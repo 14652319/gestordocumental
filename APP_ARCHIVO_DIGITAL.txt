@@ -1,0 +1,3381 @@
+from flask import Flask, request, send_file, abort, redirect, url_for, session, flash, render_template_string
+import os
+import time
+import csv
+import uuid
+import subprocess
+import hashlib
+from unidecode import unidecode
+from PyPDF2 import PdfMerger
+from werkzeug.utils import secure_filename
+import tempfile
+from datetime import datetime, timedelta
+from flask import jsonify
+from flask_socketio import SocketIO, emit, join_room, leave_room
+from flask_wtf.csrf import CSRFProtect
+from werkzeug.security import generate_password_hash, check_password_hash
+import os, pandas as pd, io
+from pathlib import Path
+
+
+app = Flask(__name__)
+app.secret_key = 'supersecreto123'
+app.permanent_session_lifetime = timedelta(minutes=20)
+socketio = SocketIO(app, cors_allowed_origins="*")  # 🔥 Configuración básica de SocketIO
+
+@socketio.on('disconnect')
+def on_disconnect():
+    session_id = session.get('session_id')
+    if session_id:
+        liberar_en_uso(session_id)
+        print(f"🔌 Usuario desconectado. Sesión liberada: {session_id}")
+
+
+
+carpetas_base = {
+    "CYS": r"W:\ACREEDORES_CYS\APROBADAS",
+    "DOM": r"V:\ACREEDORES_DOM\APROBADAS",
+    "TIC": r"U:\ACREEDORES_TIC\APROBADAS",
+    "MER": r"X:\APROBADAS",
+    "CYS_C": r"W:\ACREEDORES_CYS\CAUSADAS",
+    "DOM_C": r"V:\ACREEDORES_DOM\CAUSADAS",
+    "TIC_C": r"U:\ACREEDORES_TIC\CAUSADAS",
+    "MER_C": r"X:\CAUSADAS",
+   # "D": r"D:\\",
+    #"Todo": r"\\192.168.11.227\\acreedores_digitales",
+    "SS": r"D:\PERFIL\Escritorio\Escritorio\3. Seguridad Social",
+
+    #"FILERR": r"D:\PERFIL"
+    
+}
+
+usuarios_validos = {
+    'admin': '12345',
+    'brayan': 'Brayan#123',
+    'ricardo': 'clave_segura',
+    'master': 'master',
+    'kate': 'Kate#12345',
+    'laura': 'Laura#12345',
+    'magaly': 'Magaly#12345',
+    'alejandra': 'Alejandra#12345',
+    'yasmina': 'Yasmina#12345',
+    'diana': 'Diana#12345',
+    'master': 'Master#123'
+}
+
+# 📑 Ruta del CSV de bloqueos
+CSV_BLOQUEOS = r"D:\PERFIL\Escritorio\Escritorio\100. Proyecto\Proyecto Gestor Documental\bd\bloqueos.csv"
+
+# Crear CSV si no existe
+if not os.path.exists(CSV_BLOQUEOS):
+    with open(CSV_BLOQUEOS, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['archivo', 'usuario', 'session_id', 'timestamp'])
+
+def marcar_en_uso(archivo, usuario, session_id):
+    bloqueos = obtener_bloqueos()
+    bloqueos[archivo] = {'usuario': usuario, 'session_id': session_id, 'timestamp': datetime.now().isoformat()}
+    guardar_bloqueos(bloqueos)
+    socketio.emit('archivo_bloqueado', {'archivo': archivo, 'usuario': usuario})
+
+
+#🔴 Cierra sesión con el botón (/logout_forzado) ✅
+def liberar_en_uso(session_id):
+    bloqueos = obtener_bloqueos()
+    archivos_liberados = []
+    for archivo in list(bloqueos.keys()):
+        if bloqueos[archivo]['session_id'] == session_id:   
+            archivos_liberados.append(archivo)
+            bloqueos.pop(archivo)
+    guardar_bloqueos(bloqueos)
+    for archivo in archivos_liberados:
+        socketio.emit('archivo_liberado', {'archivo': archivo})
+        
+        
+ ## nueva funcion para liberar archivos visualizados       
+def liberar_archivos_y_marcar_nuevo(nuevo_archivo, usuario, session_id):
+    bloqueos = obtener_bloqueos()
+    archivos_liberados = []
+
+    for archivo in list(bloqueos.keys()):
+        if bloqueos[archivo]['session_id'] == session_id:
+            archivos_liberados.append(archivo)
+            bloqueos.pop(archivo)
+
+    bloqueos[nuevo_archivo] = {'usuario': usuario, 'session_id': session_id, 'timestamp': datetime.now().isoformat()}
+    guardar_bloqueos(bloqueos)
+
+    # Emitir eventos
+    for archivo in archivos_liberados:
+        socketio.emit('archivo_liberado', {'archivo': archivo})
+    socketio.emit('archivo_bloqueado', {'archivo': nuevo_archivo, 'usuario': usuario})
+
+
+def guardar_bloqueos(bloqueos):
+    with open(CSV_BLOQUEOS, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=['archivo', 'usuario', 'session_id', 'timestamp'])
+        writer.writeheader()
+        for archivo, datos in bloqueos.items():
+            writer.writerow({
+                'archivo': archivo,
+                'usuario': datos.get('usuario', ''),
+                'session_id': datos.get('session_id', ''),
+                'timestamp': datos.get('timestamp', '')
+            })
+
+
+def obtener_bloqueos():
+    bloqueos = {}
+    if os.path.exists(CSV_BLOQUEOS):
+        with open(CSV_BLOQUEOS, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                bloqueos[row['archivo']] = row
+    return bloqueos
+
+
+
+################################################################################################################
+
+import subprocess
+import os
+import hashlib
+
+# 📌 Ruta donde guardar el requirements.txt
+base_path = r"D:\PERFIL\Escritorio\Escritorio\100. Proyecto\Proyecto Gestor Documental"
+requerimientos_folder = os.path.join(base_path, "requerimientos")
+archivo_requerimientos = os.path.join(requerimientos_folder, "requirements.txt")
+
+# 🔸 Crea la carpeta si no existe
+os.makedirs(requerimientos_folder, exist_ok=True)
+
+# 🔸 Ejecuta pip freeze
+resultado = subprocess.run(["pip", "freeze"], capture_output=True, text=True)
+
+if resultado.returncode == 0:
+    contenido_nuevo = resultado.stdout
+
+    # 🔸 Calcula hash del contenido actual (si existe)
+    hash_nuevo = hashlib.sha256(contenido_nuevo.encode('utf-8')).hexdigest()
+    hash_actual = None
+    if os.path.exists(archivo_requerimientos):
+        with open(archivo_requerimientos, "r", encoding="utf-8") as f:
+            contenido_actual = f.read()
+            hash_actual = hashlib.sha256(contenido_actual.encode('utf-8')).hexdigest()
+
+    # 🔸 Compara hashes y actualiza solo si hay cambios
+    if hash_nuevo != hash_actual:
+        with open(archivo_requerimientos, "w", encoding="utf-8") as f:
+            f.write(contenido_nuevo)
+        print(f"✅ requirements.txt actualizado en {archivo_requerimientos}")
+    else:
+        print("🔸 requirements.txt ya está actualizado. No hay cambios.")
+else:
+    print("❌ Error al generar requirements.txt:", resultado.stderr)
+
+
+
+
+
+
+#####################################################################################################################
+CSV_ESTADOS = "estado_archivos.csv"
+
+if not os.path.exists(CSV_ESTADOS):
+    with open(CSV_ESTADOS, "w", newline='', encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["fecha", "hora", "documento", "estado", "evento", "carpeta", "ubicacion", "tipo", "tamano", "observaciones"])
+
+def registrar_estado(documento, estado, evento, carpeta, ubicacion, tipo, tamano, observaciones):
+    fecha_actual = datetime.now().strftime("%Y-%m-%d")
+    hora_actual = datetime.now().strftime("%H:%M:%S")
+    with open(CSV_ESTADOS, "a", newline='', encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([fecha_actual, hora_actual, documento, estado, evento, carpeta, ubicacion, tipo, tamano, observaciones])
+
+def obtener_ultimo_estado():
+    estado_por_archivo = {}
+    if os.path.exists(CSV_ESTADOS):
+        with open(CSV_ESTADOS, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                estado_por_archivo[row["documento"]] = row
+    return estado_por_archivo
+
+def historial_por_archivo(nombre_archivo):
+    historial = []
+    if os.path.exists(CSV_ESTADOS):
+        with open(CSV_ESTADOS, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row["documento"] == nombre_archivo:
+                    historial.append(row)
+    return historial
+
+
+## Nueva ruta para liberar archivos
+@app.route('/liberar_sesion', methods=['POST'])
+def liberar_sesion():
+    session_id = session.get('session_id')
+    if session_id:
+        liberar_en_uso(session_id)
+        print(f"⚠️ Sesión {session_id} liberada por cierre o desconexión.")
+    return '', 204
+
+
+
+
+@app.route('/cambiar_estado', methods=['POST'])
+def cambiar_estado():
+    doc = request.form["archivo"]
+    estado = request.form.get("estado", "")
+    evento = request.form.get("evento", "")
+    obs = request.form.get("observaciones", "")
+    carpeta = request.form.get("carpeta", "sin carpeta")
+    sede = request.form.get("sede", "")
+    ubicacion = request.form.get("ubicacion", doc)
+    tipo = "PDF"
+    tamano = 0
+    ruta_archivo = os.path.join(carpetas_base.get(sede, ""), doc.replace("/", os.sep))
+    if os.path.exists(ruta_archivo):
+        tamano = os.path.getsize(ruta_archivo)
+
+    registrar_estado(doc, estado, evento, carpeta, ubicacion, tipo, tamano, obs)
+
+    # ❌ Esto causa el error
+    # return redirect(url_for('index', sede=sede, carpeta=carpeta, archivo=doc))
+
+    # ✅ Cambia por esto
+    return redirect(url_for('vista_causacion', sede=sede, carpeta=carpeta, archivo=doc))
+
+
+
+
+
+index_html = """
+<!DOCTYPE html>
+<html lang=\"es\">
+<head>
+    <meta charset=\"UTF-8\">
+    <title>📊 Gestor Documental Mejorado</title>
+    <style>
+        body { background-color: #121212; color: #e0e0e0; font-family: Arial; margin: 0; padding: 0; }
+        header {
+            position: sticky; top: 0; background-color: #1f1f1f; padding: 10px; z-index: 1000;
+            border-bottom: 1px solid #444; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;
+        }
+        form { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+        select, input, button, textarea {
+            padding: 6px; background-color: #333; color: #fdd835; border: 1px solid #888; border-radius: 6px; max-width: 200px;
+        }
+        select[multiple] { height: 100px; }
+        .container { display: flex; height: calc(100vh - 150px); flex-direction: row; }
+        .lista { width: 40%; overflow-y: auto; border-right: 1px solid #333; padding: 10px; }
+        // .lista { height: 50%; overflow-y: auto; border-bottom: 1px solid #333; padding: 10px; }
+        .visor { width: 60%; height: 100%; }
+        .visor iframe { width: 100%; height: 100%; border: none; }
+        ul { list-style: none; padding: 0; }
+        li { padding: 10px; border-bottom: 1px solid #333; transition: background-color 0.2s ease-in-out; }
+        .estado-aprobado { background-color: #2e7d32; color: white; border-radius: 6px; }
+        .estado-rechazado { background-color: #c62828; color: white; border-radius: 6px; }
+        .estado-novedad { background-color: #ef6c00; color: white; border-radius: 6px; }
+        .estado-especial { background-color: #fdd835; color: black; border-radius: 6px; }
+        li:hover:not(.seleccionado) { background-color: #ff9800; color: black; border-radius: 4px; }
+        .seleccionado { background-color: #ff9800; color: black; border-radius: 4px; }
+        a { color: #64b5f6; text-decoration: none; margin-right: 5px; }
+        a:hover { text-decoration: underline; }
+        .acciones { margin-top: 5px; }
+        .contador-docs { font-size: 0.9em; color: #fdd835; margin-left: 10px; }
+        .paginacion {
+            background: #1f1f1f;
+            padding: 10px;
+            border-top: 1px solid #333;
+            text-align: center;
+            position: sticky;
+            top: 50px;
+            z-index: 999;
+        }
+        .paginacion a { margin: 0 5px; color: #fdd835; text-decoration: none; }
+        .paginacion a:hover { text-decoration: underline; }
+        .verde-ocupado { background-color: rgba(144, 238, 144, 0.5); color: black; }
+    </style>
+    <script src=\"https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js\"></script>
+    <script>
+        const socket = io();
+
+        socket.on('archivo_bloqueado', (data) => {
+            const archivo = data.archivo;
+            const usuario = data.usuario;
+            const elemento = document.querySelector(`li[data-archivo=\"${archivo}\"]`);
+            if (elemento) {
+                elemento.classList.add('verde-ocupado');
+                elemento.setAttribute('title', `Visualizado por: ${usuario}`);
+            }
+        });
+
+        socket.on('archivo_liberado', (data) => {
+            const archivo = data.archivo;
+            const elemento = document.querySelector(`li[data-archivo=\"${archivo}\"]`);
+            if (elemento) {
+                elemento.classList.remove('verde-ocupado');
+                elemento.removeAttribute('title');
+            }
+        });
+
+        window.addEventListener("beforeunload", function () {
+            navigator.sendBeacon("/liberar_sesion");
+        });
+
+        function mostrarPDF(url, archivoCompleto, usuario) {
+            fetch('/visualizar_archivo', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ archivo: archivoCompleto, usuario: usuario })
+            });
+            document.getElementById('visor-pdf').src = url;
+        }
+
+        function guardarScroll() {
+            const scrollPos = document.querySelector('.lista').scrollTop;
+            sessionStorage.setItem('scrollPos', scrollPos);
+        }
+
+        function cambiarPorPagina(valor) {
+            const params = new URLSearchParams(window.location.search);
+            params.set('por_pagina', valor);
+            params.set('pagina', 1);
+            window.location.search = params.toString();
+        }
+
+        window.onload = function () {
+            const scrollPos = sessionStorage.getItem('scrollPos');
+            if (scrollPos) {
+                document.querySelector('.lista').scrollTop = scrollPos;
+                sessionStorage.removeItem('scrollPos');
+            }
+        };
+    </script>
+</head>
+<body>
+<header>
+    <form method=\"get\">
+        <label for=\"sede\">Sede(s):</label>
+        <select name=\"sede\" multiple onchange=\"this.form.submit()\">
+            <option value=\"Todo\" {% if 'Todo' in sede %}selected{% endif %}>🔗 Todo</option>
+            {% for s in sedes if s != 'Todo' %}<option value=\"{{ s }}\" {% if s in sede %}selected{% endif %}>{{ s }}</option>{% endfor %}
+        </select>
+        <label for=\"carpeta\">Carpeta:</label>
+        <select name=\"carpeta\" onchange=\"this.form.submit()\">
+            <option value=\"__all__\" {% if ruta_relativa == \"__all__\" %}selected{% endif %}>Todas</option>
+            {% for c in carpetas %}<option value=\"{{ c }}\" {% if c == ruta_relativa %}selected{% endif %}>{{ c }}</option>{% endfor %}
+        </select>
+        <label for=\"filtro\">Filtro:</label>
+        <input type=\"text\" name=\"filtro\" value=\"{{ filtro }}\" onkeypress=\"if(event.key==='Enter'){this.form.submit();}\">
+        <label for=\"por_pagina\">Mostrar:</label>
+        <select name=\"por_pagina\" onchange=\"this.form.submit()\">
+            <option value=\"50\" {% if por_pagina==50 %}selected{% endif %}>50</option>
+            <option value=\"70\" {% if por_pagina==70 %}selected{% endif %}>70</option>
+            <option value=\"100\" {% if por_pagina==100 %}selected{% endif %}>100</option>
+        </select>
+        
+
+        <button type="submit">Buscar</button>
+        <a href="/exportar-excel?{% for s in sede %}sede={{ s }}&{% endfor %}carpeta={{ ruta_relativa }}&filtro={{ filtro }}"
+        style="background:#4CAF50; color:white; padding:6px 12px; border-radius:4px; text-decoration:none; margin-left:10px;">
+        📥 Exportar Excel
+        </a>
+
+
+    </form>
+    <div><a href=\"{{ url_for('dashboard') }}\" style=\"color:white;background-color:red;padding:6px 12px;text-decoration:none;border-radius:4px;\">Salir</a><span class=\"contador-docs\">📄 Documentos: {{ cantidad_archivos }}</span></div>
+</header>
+<div class=\"paginacion\">
+    Página {{ pagina }} de {{ total_paginas }}
+    {% if pagina>1 %}
+        <a href=\"?pagina={{ pagina-1 }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&filtro={{ filtro }}{% for s in sede %}&sede={{ s }}{% endfor %}\">Anterior</a>
+    {% endif %}
+    {% for p in range(1,total_paginas+1) %}
+        {% if p==1 or p==total_paginas or (p>=pagina-2 and p<=pagina+2) %}
+            <a href=\"?pagina={{ p }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&filtro={{ filtro }}{% for s in sede %}&sede={{ s }}{% endfor %}\" {% if p==pagina %}style=\"font-weight:bold;\"{% endif %}>{{ p }}</a>
+        {% elif p == pagina-3 or p == pagina+3 %}...{% endif %}
+    {% endfor %}
+    {% if pagina<total_paginas %}
+        <a href=\"?pagina={{ pagina+1 }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&filtro={{ filtro }}{% for s in sede %}&sede={{ s }}{% endfor %}\">Siguiente</a>
+    {% endif %}
+</div>
+<div class=\"container\">
+    <div class=\"lista\">
+        <ul>
+        {% for sede_archivo, archivo, fecha in archivos %}
+            {% set nombre = archivo.split('/')[-1] %}
+            {% set estado = estados.get(nombre, {}) %}
+            <li data-archivo=\"{{ sede_archivo + '/' + archivo }}\"
+                class=\"{% if sede_archivo+'/'+archivo == archivo_actual %}seleccionado {% endif %}{% if estado.estado == 'Aprobado' %}estado-aprobado{% elif estado.estado == 'Rechazado' %}estado-rechazado{% elif estado.estado == 'Novedad' %}estado-novedad{% elif estado.estado == 'Especial' %}estado-especial{% endif %}{% if archivos_ocupados.get(sede_archivo + '/' + archivo) %} verde-ocupado{% endif %}\"
+                {% if archivos_ocupados.get(sede_archivo + '/' + archivo) %}
+                    title=\"Visualizado por: {{ archivos_ocupados[sede_archivo + '/' + archivo]['usuario'] }}\"
+                {% endif %}>
+                <strong title=\"{{ estado.observaciones }}\">{{ nombre }}</strong><br>
+                🗓 {{ fecha|datetimeformat }} {% if estado.evento %}{% for e in estado.evento.split(',') %}{{ {'Recibida':'📦','Revisada':'🔍','Aprobada':'✅','Causada':'🏁','Rechazada':'❌','Novedad':'⚠️','Especial':'🟡','Pagada':'💰','Auditada':'📋'}.get(e.strip(),'') }}{% endfor %}{% endif %}<br>
+                <div class=\"acciones\">
+                    
+                    <a href=\"?{% for s in sede %}sede={{ s }}&{% endfor %}carpeta={{ ruta_relativa }}&filtro={{ filtro }}&archivo={{ sede_archivo }}/{{ archivo }}&pagina={{ pagina }}&por_pagina={{ por_pagina }}\" onclick=\"guardarScroll();mostrarPDF('{{ url_for('servir_pdf', sede=sede_archivo, archivo=archivo) }}', '{{ sede_archivo }}/{{ archivo }}', '{{ session['usuario'] }}')\">📄 Ver PDF</a>
+                    
+                    
+                    <a href="{{ url_for('renombrar', archivo=archivo, sede=sede_archivo, carpeta=ruta_relativa, filtro=filtro, pagina=pagina, por_pagina=por_pagina) }}">✏️ Renombrar</a>
+
+                    {% if session['usuario'] in ['alejandra', 'master', 'ricardo', 'admin'] %}
+                    <a href="#" onclick="
+                        if (confirm('⚠️ ¿Estás seguro de que deseas borrar este archivo?')) {
+                            if (confirm('❗ Esta acción no se puede deshacer. ¿Confirmas que deseas enviarlo a la papelera?')) {
+                                fetch('/borrar_archivo', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ sede: '{{ sede_archivo }}', archivo: '{{ archivo }}' })
+                                }).then(resp => {
+                                    if (resp.ok) {
+                                        location.reload();
+                                    } else {
+                                        alert('❌ Error al borrar el archivo.');
+                                    }
+                                });
+                            }
+                        }
+                        return false;
+                    ">🗑️ Borrar Documento</a>
+                    {% endif %}
+
+                </div>
+            </li>
+        {% endfor %}
+        </ul>
+    </div>
+    <div class=\"visor\">
+    
+        
+        <iframe id="visor-pdf" src="{% if archivo_actual %}{{ url_for('servir_pdf', sede=archivo_actual.split('/')[0], archivo='/'.join(archivo_actual.split('/')[1:]) | urlencode) }}{% endif %}"></iframe>
+
+    </div>
+</div>
+<div class=\"paginacion\">
+    Página {{ pagina }} de {{ total_paginas }}
+    {% if pagina>1 %}
+        <a href=\"?pagina={{ pagina-1 }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&filtro={{ filtro }}{% for s in sede %}&sede={{ s }}{% endfor %}\">Anterior</a>
+    {% endif %}
+    {% for p in range(1,total_paginas+1) %}
+        {% if p==1 or p==total_paginas or (p>=pagina-2 and p<=pagina+2) %}
+            <a href=\"?pagina={{ p }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&filtro={{ filtro }}{% for s in sede %}&sede={{ s }}{% endfor %}\" {% if p==pagina %}style=\"font-weight:bold;\"{% endif %}>{{ p }}</a>
+        {% elif p == pagina-3 or p == pagina+3 %}...{% endif %}
+    {% endfor %}
+    {% if pagina<total_paginas %}
+        <a href=\"?pagina={{ pagina+1 }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&filtro={{ filtro }}{% for s in sede %}&sede={{ s }}{% endfor %}\">Siguiente</a>
+    {% endif %}
+</div>
+</body>
+</html>
+"""
+
+renombrar_html = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Renombrar PDF</title>
+    <style>
+        body { background-color: #121212; color: #e0e0e0; font-family: Arial; padding: 20px; }
+        input, button {
+            background-color: #2a2a2a;
+            color: white;
+            border: 1px solid #555;
+            padding: 8px;
+            border-radius: 4px;
+        }
+        input[type="text"] {
+            width: 60%;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #333;
+        }
+        a.volver-enlace {
+            color: #f1c40f;
+            text-decoration: none;
+            font-weight: bold;
+            font-size: 1.1em;
+            transition: color 0.3s ease, text-decoration 0.3s ease;
+        }
+        a.volver-enlace:hover {
+            color: #ffd700;
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <h1>Renombrar: {{ nombre_actual }}</h1>
+
+    <form method="post" enctype="multipart/form-data">
+        <label for="nuevo_nombre">Nuevo nombre:</label><br>
+        <input type="text" name="nuevo_nombre" value="{{ nombre_actual }}" required><br><br>
+
+        <label for="archivos_adicionales">Seleccionar otros PDFs para unir (opcional):</label><br>
+        <input type="file" name="archivos_adicionales" multiple accept=".pdf"><br><br>
+
+        <label>
+            <input type="checkbox" name="descargar_copia" value="1">
+            ¿Desea descargar una copia después de guardar?
+        </label><br><br>
+
+        <p><strong>¿Dónde desea guardar el archivo?</strong></p>
+        <label><input type="radio" name="destino" value="original" checked> Carpeta Original (para revisión)</label><br>
+        <label><input type="radio" name="destino" value="causadas"> Carpeta Definitiva (CAUSADAS)</label><br><br>
+
+        <button type="submit" onclick="return confirm('¿Está seguro de que desea renombrar y guardar los archivos en la carpeta seleccionada?')">Renombrar y Guardar</button>
+    </form> 
+
+    <p>
+        <a class="volver-enlace" href="{{ url_for('vista_causacion', sede=sede, carpeta=carpeta, filtro=filtro, pagina=pagina, por_pagina=por_pagina) }}">⏪ Volver</a>
+
+    </p>
+</body>
+</html>
+"""
+
+login_html = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Iniciar Sesión</title>
+    <style>
+        body {
+            background-color: #121212;
+            color: #e0e0e0;
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        .login-container {
+            background-color: #1f1f1f;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px #000;
+            width: 300px;
+            margin-right: 20px; /* Agrega espacio entre el formulario y la imagen */
+        }
+        .image-container {
+            text-align: center;
+            flex-grow: 1; /* Permite que la imagen ocupe el espacio restante */
+        }
+        .image-container img {
+            max-width: 100%;
+            height: auto;
+        }
+        input, button {
+            width: 100%;
+            margin-bottom: 10px;
+            padding: 10px;
+            background-color: #2a2a2a;
+            border: 1px solid #555;
+            color: white;
+            border-radius: 4px;
+        }
+        button:hover {
+            background-color: #333;
+        }
+        .error {
+            color: red;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+        .form-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+            .form-field {
+            width: 100%;
+            max-width: 300px;
+            margin-bottom: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="login-container">
+
+        <form method="post">
+            <h2>Iniciar sesión</h2>
+            {% if error %}
+                <div class="error">{{ error }}</div>
+            {% endif %}
+            <input type="text" name="usuario" placeholder="Usuario" required>
+            <input type="password" name="clave" placeholder="Contraseña" required>
+            <button type="submit">Ingresar</button>
+        </form>
+    </div>
+    <div class="image-container">
+        <img src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQ8twqevaQsT21o9O-SVNAnjxKL90Kwpj4UQj-MSbnnFEUbDcszLkSHTYeEKMjlvYZtqnc&usqp=CAU" alt="¡¡¡Mas Cerca de Ti!!!" style="max-width:100%; height:auto;">
+    </div>
+</body>
+</html>
+"""
+
+dashboard_html = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Panel de Inicio - Gestión Documental - Supertiendas Cañaveral</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    body {
+      background-color: #1f2937;
+      color: white;
+      font-family: 'Inter', sans-serif;
+      padding: 20px;
+      margin: 0;
+    }
+    h1 {
+      text-align: center;
+      font-size: 2em;
+      margin-bottom: 30px;
+    }
+    .search-bar {
+      max-width: 500px;
+      margin: 0 auto 30px auto;
+    }
+    input[type="text"] {
+      width: 100%;
+      padding: 12px 20px;
+      background-color: #374151;
+      border: 1px solid #4b5563;
+      border-radius: 8px;
+      color: white;
+      font-size: 16px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 20px;
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+    .card {
+      position: relative;
+      background-color: #374151;
+      padding: 25px;
+      border-radius: 15px;
+      text-align: center;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+      cursor: pointer;
+    }
+    .card:hover {
+      transform: scale(1.05);
+      box-shadow: 0 0 15px rgba(255, 255, 255, 0.1);
+    }
+    .icon {
+      font-size: 2.5em;
+      margin-bottom: 10px;
+    }
+    .title {
+      font-weight: 600;
+      font-size: 1.1em;
+    }
+    .tooltip {
+      position: absolute;
+      bottom: 110%;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: #111827;
+      color: white;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 0.9em;
+      opacity: 0;
+      white-space: nowrap;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+      z-index: 10;
+    }
+    .card:hover .tooltip {
+      opacity: 1;
+    }
+    /* 🔥 Botón Salir 🔥 */
+    .boton-salir {
+      display: block;
+      margin: 20px auto;
+      padding: 10px 20px;
+      background-color: red;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 1em;
+      cursor: pointer;
+      transition: background-color 0.3s ease;
+    }
+    .boton-salir:hover {
+      background-color: darkred;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Panel de Inicio - Gestión Documental</h1>
+  <h1>Supertiendas Cañaveral</h1>
+
+  <div class="search-bar">
+    <input type="text" placeholder="Buscar por NIT, nombre de documento...">
+  </div>
+
+  <div class="grid">
+    <div class="card" onclick="location.href='/solicitudes'">
+      <div class="tooltip">Crear solicitudes de bienes o servicios con adjuntos</div>
+      <div class="icon">📦</div>
+      <div class="title">Solicitudes</div>
+    </div>
+    <div class="card" onclick="location.href='/compras'">
+      <div class="tooltip">Gestionar órdenes de compra, cargar Excel, subir facturas</div>
+      <div class="icon">📑</div>
+      <div class="title">Compras</div>
+    </div>
+    <div class="card" onclick="location.href='/causacion'">
+      <div class="tooltip">Visualizar documentos aprobados, renombrarlos y guardar</div>
+      <div class="icon">🧾</div>
+      <div class="title">Causación</div>
+    </div>
+    <div class="card" onclick="location.href='/aprobaciones'">
+      <div class="tooltip">Revisar documentos, ver visor PDF, aprobar o rechazar</div>
+      <div class="icon">🏦</div>
+      <div class="title">Aprobaciones</div>
+    </div>
+    <div class="card" onclick="location.href='/validaciones'">
+      <div class="tooltip">Verifica que los documentos estén completos y correctos</div>
+      <div class="icon">📋</div>
+      <div class="title">Validaciones</div>
+    </div>
+    <div class="card" onclick="location.href='/pagos'">
+      <div class="tooltip">Asocia pagos a facturas, adjunta comprobantes</div>
+      <div class="icon">💰</div>
+      <div class="title">Pagos</div>
+    </div>
+    <div class="card" onclick="location.href='/archivo-muerto'">
+      <div class="tooltip">Consultar documentos ya tramitados o pagados</div>
+      <div class="icon">📂</div>
+      <div class="title">Archivo Muerto</div>
+    </div>
+    <div class="card" onclick="location.href='/notas-contables'">
+      <div class="tooltip">Cargar y consultar soportes de notas contables</div>
+      <div class="icon">📓</div>
+      <div class="title">Notas Contables</div>
+    </div>
+    
+    <div class="card" onclick="location.href='/seguridad-social'">
+        <div class="tooltip">Gestión de Seguridad Social</div>
+        <div class="icon">📄</div>
+        <div class="title">Seguridad Social</div>
+    </div>
+    
+    <div class="card" onclick="location.href='/activos-fijos'">
+      <div class="tooltip">Gestionar movimientos de activos con autorización</div>
+      <div class="icon">🏷️</div>
+      <div class="title">Activos Fijos</div>
+    </div>
+    <div class="card" onclick="location.href='/documentos-internos'">
+      <div class="tooltip">Para documentos internos que requieren autorización local</div>
+      <div class="icon">🏠</div>
+      <div class="title">Documentos Internos</div>
+    </div>
+    
+        <div class="card" onclick="location.href='/notas-contables'">
+      <div class="tooltip">Revisa la trazabilidad de los documentos, para auditoria</div>
+      <div class="icon">🔗</div>
+      <div class="title">Log</div>
+    </div>
+
+        {% if session['usuario'] in ['admin', 'master'] %}
+       
+        <div class="card" onclick="location.href='/admin/permisos'">
+       <div class="tooltip">Gestionar usuarios y permisos</div>
+       <div class="icon">🔐</div>
+       <div class="title">Administrador</div>
+    </div>
+    {% endif %}
+
+  </div>
+
+  <!-- Botón de salir (redirige a logout) -->
+  <button class="boton-salir" onclick="location.href='/logout_forzado'">Salir al Login</button>
+
+</body>
+</html>
+"""
+
+SeguridadSocial_html = """
+<!DOCTYPE html><html lang="es"><head>
+<meta charset="UTF-8"><title>Seguridad Social</title>
+<style>
+body { background:#121212; color:#e0e0e0; font-family:Arial; margin:0; padding:0; }
+header { background:#1f1f1f; padding:10px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; position:sticky; top:0; z-index:100; }
+form { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+select,input,button { padding:6px; background:#333; color:#fdd835; border:1px solid #888; border-radius:6px; max-width:200px; }
+.container { display:flex; height:calc(100vh - 140px); }
+.lista { width:40%; overflow-y:auto; border-right:1px solid #333; padding:10px; }
+.visor { width:60%; height:100%; }
+.visor iframe { width:100%; height:100%; border:none; }
+ul { list-style:none; padding:0; }
+li { padding:10px; border-bottom:1px solid #333; cursor:pointer; }
+li:hover, .seleccionado { background:#ff9800; color:black; border-radius:4px; }
+a { color:#4FC3F7; text-decoration:none; font-weight:bold; }
+a:hover { text-decoration:underline; }
+.boton-ver { color:white; background:#2196f3; padding:4px 8px; border-radius:4px; margin-right:5px; }
+.boton-renombrar { color:white; background:#9c27b0; padding:4px 8px; border-radius:4px; }
+.boton-agregar { background:#4caf50; color:white; padding:6px 12px; border-radius:4px; text-decoration:none; }
+.boton-tercero { background:#ff9800; color:black; padding:6px 12px; border-radius:4px; text-decoration:none; }
+.paginacion { background:#1f1f1f; padding:10px; text-align:center; border-top:1px solid #333; position:sticky; bottom:0; }
+</style>
+<script>
+function mostrarPDF(url, archivo) {
+    document.getElementById('visor-pdf').src = url;
+    sessionStorage.setItem('archivoActual', archivo);
+    sessionStorage.setItem('scrollPos', document.querySelector('.lista').scrollTop);
+    const params = new URLSearchParams(window.location.search);
+    params.set('archivo', archivo);
+    history.replaceState(null, '', '?' + params.toString());
+    document.querySelectorAll('li').forEach(el => el.classList.remove('seleccionado'));
+    document.querySelector(`li[data-archivo="${archivo}"]`).classList.add('seleccionado');
+}
+window.onload=function(){
+    const archivoActual = sessionStorage.getItem('archivoActual');
+    const scrollPos = sessionStorage.getItem('scrollPos');
+    if(archivoActual){
+        document.querySelectorAll('li').forEach(el=>{
+            if(el.getAttribute('data-archivo')===archivoActual){
+                el.classList.add('seleccionado');
+            }
+        });
+    }
+    if(scrollPos){document.querySelector('.lista').scrollTop=scrollPos;}
+};
+</script>
+</head><body>
+<header>
+<form method="get">
+<input type="text" name="filtro" value="{{ filtro }}" placeholder="Buscar NIT, nombre, mes...">
+<select name="carpeta" onchange="this.form.submit()">
+<option value="">Todos</option>
+{% for c in carpetas %}<option value="{{ c }}" {% if c==ruta_relativa %}selected{% endif %}>{{ c }}</option>{% endfor %}
+</select>
+<select name="subcarpeta" onchange="this.form.submit()">
+<option value="">Todos los años</option>
+{% for sc in subcarpetas %}<option value="{{ sc }}" {% if sc==subcarpeta %}selected{% endif %}>{{ sc }}</option>{% endfor %}
+</select>
+<select name="por_pagina" onchange="this.form.submit()">
+<option value="10" {% if por_pagina==30 %}selected{% endif %}>30</option>
+<option value="20" {% if por_pagina==50 %}selected{% endif %}>50</option>
+<option value="50" {% if por_pagina==100 %}selected{% endif %}>100</option>
+</select>
+<button type="submit">Filtrar</button>
+</form>
+<div style="display:flex; gap:10px;">
+<span>📄 Documentos: {{ cantidad_archivos }}</span>
+<a href="{{ url_for('adicionar_planilla') }}" class="boton-agregar">➕ Adicionar Planilla</a>
+<a href="{{ url_for('nuevo_tercero') }}" class="boton-tercero">👤 Nuevo Tercero</a>
+<a href="{{ url_for('buscar_tercero_form') }}" class="boton-tercero">👤 Editar Tercero</a>
+<a href="{{ url_for('dashboard') }}" style="color:white;background:red;padding:6px 12px;border-radius:4px;">Salir</a>
+</div>
+
+</header>
+<div class="paginacion">
+Página {{ pagina }} de {{ total_paginas }}
+{% if pagina>1 %}<a href="?pagina={{ pagina-1 }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&subcarpeta={{ subcarpeta }}&filtro={{ filtro }}">Anterior</a>{% endif %}
+{% for p in range(1,total_paginas+1) %}{% if p<=3 or p>total_paginas-3 or (p>=pagina-2 and p<=pagina+2) %}<a href="?pagina={{ p }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&subcarpeta={{ subcarpeta }}&filtro={{ filtro }}" {% if p==pagina %}style="font-weight:bold;"{% endif %}>{{ p }}</a>{% elif p==4 or p==total_paginas-3 %}...{% endif %}{% endfor %}
+{% if pagina<total_paginas %}<a href="?pagina={{ pagina+1 }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&subcarpeta={{ subcarpeta }}&filtro={{ filtro }}">Siguiente</a>{% endif %}
+</div>
+<div class="container">
+<div class="lista">
+<ul>
+{% for sede, archivo, nombre_archivo, fecha in archivos %}
+<li data-archivo="{{ archivo }}">
+<strong>{{ nombre_archivo }}</strong><br>🗓 {{ fecha|datetimeformat }}<br>
+<a href="javascript:void(0);" class="boton-ver" onclick="mostrarPDF('{{ url_for('servir_pdf', sede='SS', archivo=archivo) }}','{{ archivo }}')">Ver PDF</a>
+<a href="{{ url_for('renombrar_planilla', archivo=archivo) }}" class="boton-renombrar">Renombrar</a>
+</li>
+{% endfor %}
+</ul>
+
+</div>
+<div class="visor">
+<iframe id="visor-pdf" src="{% if archivo_actual %}{{ url_for('servir_pdf', sede='SS', archivo=archivo_actual) }}{% endif %}"></iframe>
+</div>
+</div>
+<div class="paginacion">
+Página {{ pagina }} de {{ total_paginas }}
+{% if pagina>1 %}<a href="?pagina={{ pagina-1 }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&subcarpeta={{ subcarpeta }}&filtro={{ filtro }}">Anterior</a>{% endif %}
+{% for p in range(1,total_paginas+1) %}{% if p<=3 or p>total_paginas-3 or (p>=pagina-2 and p<=pagina+2) %}<a href="?pagina={{ p }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&subcarpeta={{ subcarpeta }}&filtro={{ filtro }}" {% if p==pagina %}style="font-weight:bold;"{% endif %}>{{ p }}</a>{% elif p==4 or p==total_paginas-3 %}...{% endif %}{% endfor %}
+{% if pagina<total_paginas %}<a href="?pagina={{ pagina+1 }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&subcarpeta={{ subcarpeta }}&filtro={{ filtro }}">Siguiente</a>{% endif %}
+</div>
+</body></html>
+"""
+
+SeguridadSocial_AdicionarPlanilla_html = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Adicionar Planilla - Seguridad Social</title>
+    <style>
+        body { background-color: #121212; color: #e0e0e0; font-family: Arial; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .form-container { background-color: #1f1f1f; padding: 20px; border-radius: 10px; box-shadow: 0 0 10px #000; max-width: 450px; width: 90%; }
+        h2 { text-align: center; color: #fdd835; }
+        label { display: block; margin: 10px 0 5px; font-weight: bold; }
+        input, button, select { width: 100%; padding: 10px; margin-bottom: 10px; background-color: #2a2a2a; color: white; border: 1px solid #555; border-radius: 6px; }
+        input::placeholder { color: #aaa; }
+        button { background-color: #4caf50; color: white; font-size: 16px; cursor: pointer; transition: background-color 0.3s ease; }
+        button:hover { background-color: #45a049; }
+        .volver-enlace { display: block; text-align: center; margin-top: 10px; color: #f1c40f; text-decoration: none; font-weight: bold; }
+        .volver-enlace:hover { color: #ffd700; text-decoration: underline; }
+        .correccion-container { display: flex; align-items: center; gap: 5px; margin-bottom: 10px; }
+    </style>
+    <script>
+        const terceros = {{ terceros_json|safe }};
+        function buscarTercero() {
+            const nit = document.getElementById('nit').value.trim();
+            if (!nit) return;
+            if (terceros[nit]) {
+                const data = terceros[nit];
+                const nombreCompleto = `${data.Primer_Apellido || ''} ${data.Segundo_Apellido || ''} ${data.Primer_Nombre || ''} ${data.Segundo_Nombre || ''}`.trim();
+                document.getElementById('nombre_completo').value = nombreCompleto;
+            } else {
+                if (confirm("El NIT no está registrado. ¿Desea crear un nuevo tercero?")) {
+                    window.location.href = "/nuevo-tercero";
+                }
+            }
+        }
+
+        function confirmarEnvio() {
+            const nit = document.getElementById('nit').value.trim();
+            const nombre = document.getElementById('nombre_completo').value.trim().toUpperCase();
+            const numero = document.getElementById('numero_planilla').value.trim();
+            const fecha = document.getElementById('fecha_pago').value.trim();
+            if (!fecha) { alert("Selecciona una fecha de pago."); return false; }
+            const [anio, mes, dia] = fecha.split('-');
+            const meses = ["ENE","FEB","MAR","ABR","MAY","JUN","JUL","AGO","SEP","OCT","NOV","DIC"];
+            const mes_txt = meses[parseInt(mes)-1];
+            const correccion = document.getElementById('correccion').checked ? ' Correccion' : '';
+            const nombreArchivo = `${nombre} _ ${nit} _ ${numero} _ PAGO ${dia}-${mes}-${anio} Periodo Pagado ${mes_txt}${correccion}`;
+            if (confirm(`¿Guardar planilla con nombre:\n"${nombreArchivo}.pdf"?`)) {
+                document.getElementById('nombre_final').value = nombreArchivo;
+                return true;
+            } else return false;
+        }
+    </script>
+</head>
+<body>
+
+<div class="form-container">
+    <h2>➕ Adicionar Nueva Planilla</h2>
+    <form method="post" enctype="multipart/form-data" onsubmit="return confirmarEnvio();">
+        <label for="nit">NIT:</label>
+        <input type="text" id="nit" name="nit" placeholder="Ej: 1006108341" required onblur="buscarTercero();">
+        <label for="nombre_completo">Apellidos y Nombres:</label>
+        <input type="text" id="nombre_completo" name="nombre_completo" placeholder="Se autocompleta si el NIT existe" required>
+        <label for="numero_planilla">Número de Planilla:</label>
+        <input type="text" id="numero_planilla" name="numero_planilla" placeholder="Ej: 9480378772" required>
+        <label for="fecha_pago">Fecha de Pago:</label>
+        <input type="date" id="fecha_pago" name="fecha_pago" required>
+        <div class="correccion-container">
+            <input type="checkbox" id="correccion" name="correccion">
+            <label for="correccion">¿Es Corrección?</label>
+        </div>
+        <label for="archivo_planilla">Archivo PDF:</label>
+        <input type="file" name="archivo_planilla" accept=".pdf" required>
+        <input type="hidden" id="nombre_final" name="nombre_final">
+        <button type="submit">💾 Guardar Planilla</button>
+    </form>
+    <a href="{{ url_for('seguridad_social') }}" class="volver-enlace">⏪ Volver</a>
+</div>
+
+</body>
+</html>
+"""
+
+SeguridadSocial_RenombrarPlanilla_html = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Renombrar Planilla - Seguridad Social</title>
+    <style>
+        body {
+            background-color: #121212;
+            color: #e0e0e0;
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .form-container {
+            background-color: #1f1f1f;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 0 10px #000;
+            max-width: 600px;
+            width: 90%;
+        }
+        h2 {
+            text-align: center;
+            color: #fdd835;
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin: 10px 0 5px;
+            font-weight: bold;
+        }
+        input, button {
+            padding: 10px;
+            margin-bottom: 10px;
+            background-color: #2a2a2a;
+            color: white;
+            border: 1px solid #555;
+            border-radius: 6px;
+            font-size: 16px;
+        }
+        input::placeholder {
+            color: #aaa;
+        }
+        button {
+            width: 100%;
+            background-color: #4caf50;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .volver-enlace {
+            display: block;
+            text-align: center;
+            margin-top: 10px;
+            color: #f1c40f;
+            text-decoration: none;
+            font-weight: bold;
+        }
+        .volver-enlace:hover {
+            color: #ffd700;
+            text-decoration: underline;
+        }
+        .scroll-box {
+            overflow-x: auto;
+            width: 100%;
+        }
+        .scroll-box input {
+            min-width: 100%;
+            white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+
+<div class="form-container">
+    <h2>🔄 Renombrar Planilla</h2>
+    <p><strong>Nombre actual del archivo:</strong> {{ nombre_actual }}</p>
+    <form method="post">
+        <label for="nuevo_nombre">Nuevo nombre para la planilla (sin extensión .pdf):</label>
+        <div class="scroll-box">
+            <input type="text" name="nuevo_nombre" id="nuevo_nombre" required
+                value="{{ nombre_actual|replace('.pdf', '') }}"
+                onclick="this.select()">
+        </div>
+        <button type="submit">💾 Renombrar y Guardar</button>
+    </form>
+    <a href="{{ url_for('seguridad_social') }}" class="volver-enlace">⏪ Volver</a>
+</div>
+
+</body>
+</html>
+"""
+
+SeguridadSocial_NuevoTercero_html = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Registrar Nuevo Tercero</title>
+    <style>
+        body { background-color: #121212; color: #e0e0e0; font-family: Arial; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .form-container { background-color: #1f1f1f; padding: 20px; border-radius: 10px; box-shadow: 0 0 10px #000; max-width: 500px; width: 90%; }
+        h2 { text-align: center; color: #fdd835; }
+        label { display: block; margin: 10px 0 5px; font-weight: bold; }
+        input, button, select { width: 100%; padding: 10px; margin-bottom: 10px; background-color: #2a2a2a; color: white; border: 1px solid #555; border-radius: 6px; }
+        input::placeholder { color: #aaa; }
+        .volver-enlace { display: block; text-align: center; margin-top: 10px; color: #f1c40f; text-decoration: none; font-weight: bold; }
+        .volver-enlace:hover { color: #ffd700; text-decoration: underline; }
+        button { background-color: #4caf50; color: white; font-size: 16px; cursor: pointer; transition: background-color 0.3s ease; }
+        button:hover { background-color: #45a049; }
+        .mensaje-feedback { text-align: center; color: #ff9800; margin-bottom: 10px; font-weight: bold; }
+        .campo-obligatorio::after { content: " *"; color: red; }
+    </style>
+    <script>
+        async function verificarNIT() {
+            const nit = document.getElementById('NIT').value.trim();
+            if (!nit) return;
+
+            const respuesta = await fetch(`/buscar_tercero_json?nit=${encodeURIComponent(nit)}`);
+            const data = await respuesta.json();
+            const feedback = document.getElementById('mensaje-feedback');
+
+            if (data.encontrado) {
+                feedback.textContent = `⚠️ El NIT ${nit} ya está registrado. No es necesario volver a registrarlo.`;
+                feedback.style.color = 'red';
+                document.getElementById('guardar-btn').disabled = true;
+            } else {
+                if (confirm(`El NIT ${nit} no existe. ¿Deseas crearlo?`)) {
+                    feedback.textContent = "✔️ NIT válido. Continúa llenando los campos.";
+                    feedback.style.color = 'green';
+                    document.getElementById('guardar-btn').disabled = false;
+                } else {
+                    feedback.textContent = "⛔ NIT inválido. Por favor ingresa un NIT existente o acepta registrar uno nuevo.";
+                    feedback.style.color = 'red';
+                    document.getElementById('guardar-btn').disabled = true;
+                }
+            }
+        }
+    
+        function confirmarEnvio() {
+            const nit = document.getElementById('NIT').value.trim();
+            const nombre = document.getElementById('Primer_Nombre').value.trim();
+            if (!nit || !nombre) {
+                alert("Por favor, complete los campos obligatorios.");
+                return false;
+            }
+            alert(`El tercero ${nombre} con NIT ${nit} fue guardado satisfactoriamente.`);
+            return true;
+        }
+    </script>
+</head>
+<body>
+<div class="form-container">
+    <h2>➕ Registrar Nuevo Tercero</h2>
+    <div id="mensaje-feedback" class="mensaje-feedback"></div>
+    <form method="post" onsubmit="return confirmarEnvio();">
+        <label for="NIT" class="campo-obligatorio">NIT (Número de Identificación):</label>
+        <input type="text" id="NIT" name="NIT" placeholder="Ej: 1006108341" required onblur="verificarNIT();">
+
+        <label for="Primer_Apellido" class="campo-obligatorio">Primer Apellido:</label>
+        <input type="text" id="Primer_Apellido" name="Primer_Apellido" placeholder="Ingrese primer apellido" required>
+
+        <label for="Segundo_Apellido">Segundo Apellido:</label>
+        <input type="text" id="Segundo_Apellido" name="Segundo_Apellido" placeholder="Ingrese segundo apellido (opcional)">
+
+        <label for="Primer_Nombre" class="campo-obligatorio">Primer Nombre:</label>
+        <input type="text" id="Primer_Nombre" name="Primer_Nombre" placeholder="Ingrese primer nombre" required>
+
+        <label for="Segundo_Nombre">Segundo Nombre:</label>
+        <input type="text" id="Segundo_Nombre" name="Segundo_Nombre" placeholder="Ingrese segundo nombre (opcional)">
+
+        <label for="Correo_1" class="campo-obligatorio">Correo Electrónico 1:</label>
+        <input type="email" id="Correo_1" name="Correo_1" placeholder="Ingrese correo electrónico" required>
+
+        <label for="Correo_2">Correo Electrónico 2 (opcional):</label>
+        <input type="email" id="Correo_2" name="Correo_2" placeholder="Ingrese correo electrónico adicional">
+
+        <label for="Celular_1" class="campo-obligatorio">Celular 1:</label>
+        <input type="tel" id="Celular_1" name="Celular_1" placeholder="Ingrese celular" required>
+
+        <label for="Celular_2">Celular 2 (opcional):</label>
+        <input type="tel" id="Celular_2" name="Celular_2" placeholder="Ingrese celular adicional">
+
+        <button type="submit" id="guardar-btn">💾 Guardar</button>
+    </form>
+    <a href="{{ url_for('seguridad_social') }}" class="volver-enlace">⏪ Volver</a>
+</div>
+</body>
+</html>
+
+"""
+
+
+SeguridadSocial_EditarTercero_html = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Editar Tercero - Seguridad Social</title>
+    <style>
+        body { background-color: #121212; color: #e0e0e0; font-family: Arial; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .form-container { background-color: #1f1f1f; padding: 20px; border-radius: 10px; box-shadow: 0 0 10px #000; max-width: 500px; width: 90%; }
+        h2 { text-align: center; color: #fdd835; }
+        label { display: block; margin: 10px 0 5px; font-weight: bold; }
+        input, button { width: 100%; padding: 10px; margin-bottom: 10px; background-color: #2a2a2a; color: white; border: 1px solid #555; border-radius: 6px; }
+        input::placeholder { color: #aaa; }
+        button { background-color: #4caf50; color: white; font-size: 16px; cursor: pointer; transition: background-color 0.3s ease; }
+        button:hover { background-color: #45a049; }
+        .volver-enlace { display: block; text-align: center; margin-top: 10px; color: #f1c40f; text-decoration: none; font-weight: bold; }
+        .volver-enlace:hover { color: #ffd700; text-decoration: underline; }
+        .error-msg { color: red; text-align: center; margin-bottom: 10px; }
+        .success-msg { color: #4caf50; text-align: center; margin-bottom: 10px; }
+    </style>
+    <script>
+        const terceros = {{ terceros_json|safe }};
+        function buscarPorNIT() {
+            const nit = document.getElementById('NIT').value.trim();
+            const campos = ['Primer_Apellido','Segundo_Apellido','Primer_Nombre','Segundo_Nombre','Correo_1','Correo_2','Celular_1','Celular_2'];
+            if (terceros[nit]) {
+                const data = terceros[nit];
+                campos.forEach(campo => {
+                    document.getElementById(campo).value = data[campo] || '';
+                });
+                document.getElementById('mensaje').textContent = '✅ Tercero encontrado. Puede editar los datos.';
+                document.getElementById('mensaje').className = 'success-msg';
+                campos.forEach(campo => document.getElementById(campo).disabled = false);
+            } else {
+                document.getElementById('mensaje').textContent = '⚠️ Tercero no encontrado. Verifique el NIT.';
+                document.getElementById('mensaje').className = 'error-msg';
+                campos.forEach(campo => {
+                    document.getElementById(campo).value = '';
+                    document.getElementById(campo).disabled = true;
+                });
+            }
+        }
+    </script>
+</head>
+<body>
+
+<div class="form-container">
+    <h2>✏️ Editar Tercero</h2>
+    <div id="mensaje"></div>
+    <form method="post">
+        <label for="NIT">NIT (Número de Identificación):</label>
+        <input type="text" id="NIT" name="NIT" value="{{ tercero.NIT }}" onblur="buscarPorNIT();" required>
+
+        <label for="Primer_Apellido">Primer Apellido:</label>
+        <input type="text" id="Primer_Apellido" name="Primer_Apellido" value="{{ tercero.Primer_Apellido }}" required>
+
+        <label for="Segundo_Apellido">Segundo Apellido:</label>
+        <input type="text" id="Segundo_Apellido" name="Segundo_Apellido" value="{{ tercero.Segundo_Apellido }}">
+
+        <label for="Primer_Nombre">Primer Nombre:</label>
+        <input type="text" id="Primer_Nombre" name="Primer_Nombre" value="{{ tercero.Primer_Nombre }}" required>
+
+        <label for="Segundo_Nombre">Segundo Nombre:</label>
+        <input type="text" id="Segundo_Nombre" name="Segundo_Nombre" value="{{ tercero.Segundo_Nombre }}">
+
+        <label for="Correo_1">Correo Electrónico 1:</label>
+        <input type="email" id="Correo_1" name="Correo_1" value="{{ tercero.Correo_1 }}" required>
+
+        <label for="Correo_2">Correo Electrónico 2 (opcional):</label>
+        <input type="email" id="Correo_2" name="Correo_2" value="{{ tercero.Correo_2 }}">
+
+        <label for="Celular_1">Celular 1:</label>
+        <input type="tel" id="Celular_1" name="Celular_1" value="{{ tercero.Celular_1 }}" required>
+
+        <label for="Celular_2">Celular 2 (opcional):</label>
+        <input type="tel" id="Celular_2" name="Celular_2" value="{{ tercero.Celular_2 }}">
+
+        <button type="submit" onclick="return confirm('¿Desea guardar los cambios?')">💾 Guardar Cambios</button>
+    </form>
+    <a href="{{ url_for('seguridad_social') }}" class="volver-enlace">⏪ Volver</a>
+</div>
+
+</body>
+</html>
+
+"""
+
+SeguridadSocial_BuscarTercero_html = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>🔍 Buscar Tercero por NIT</title>
+    <style>
+        body { background-color: #121212; color: #e0e0e0; font-family: Arial; padding: 20px; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        .formulario-container { background-color: #1f1f1f; padding: 20px; border-radius: 10px; box-shadow: 0 0 10px rgba(255, 255, 255, 0.1); width: 350px; }
+        h2 { text-align: center; margin-bottom: 20px; color: #ffeb3b; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input { background-color: #2a2a2a; color: white; border: 1px solid #555; padding: 10px; border-radius: 4px; width: 100%; margin-bottom: 15px; }
+        button { background-color: #4CAF50; color: white; padding: 10px; width: 100%; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; }
+        button:hover { background-color: #45a049; }
+        .volver { display: block; text-align: center; margin-top: 10px; color: #f1c40f; text-decoration: none; font-weight: bold; }
+        .volver:hover { text-decoration: underline; color: #ffd700; }
+        .error { color: red; text-align: center; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+<div class="formulario-container">
+    <h2>🔍 Buscar Tercero por NIT</h2>
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <form method="post">
+        <label for="NIT">Ingrese NIT:</label>
+        <input type="text" name="NIT" placeholder="Número de Identificación" required>
+        <button type="submit">🔍 Buscar</button>
+    </form>
+    <a href="{{ url_for('seguridad_social') }}" class="volver">⏪ Volver</a>
+</div>
+</body>
+</html>
+"""
+
+
+
+html_admin_permisos = """
+<!DOCTYPE html>
+<html lang=\"es\">
+<head>
+  <meta charset=\"UTF-8\">
+  <title>Administrador de Permisos</title>
+  <style>
+    body {
+      background-color: #111827;
+      color: white;
+      font-family: 'Segoe UI', sans-serif;
+      margin: 0;
+      padding: 0;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 20px;
+      background-color: #1f2937;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 1.5em;
+    }
+    .volver {
+      background-color: crimson;
+      color: white;
+      padding: 10px 15px;
+      border-radius: 6px;
+      text-decoration: none;
+    }
+    .contenido {
+      padding: 20px;
+    }
+    .mensaje {
+      text-align: center;
+      margin: 15px 0;
+      font-size: 1.1em;
+    }
+    .formulario {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: center;
+      margin-bottom: 20px;
+    }
+    select, input, button {
+      padding: 10px;
+      border-radius: 6px;
+      border: 1px solid #555;
+      background-color: #1f2937;
+      color: white;
+    }
+    button {
+      cursor: pointer;
+      transition: background-color 0.3s ease;
+    }
+    button:hover {
+      background-color: #2563eb;
+    }
+    .tabla-container {
+      max-height: 500px;
+      overflow-y: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+    }
+    th, td {
+      padding: 12px;
+      border-bottom: 1px solid #444;
+      text-align: left;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      background-color: #1f2937;
+      z-index: 5;
+      cursor: pointer;
+    }
+  </style>
+  <script>
+    // Ordenar tabla al hacer clic en los encabezados
+    function ordenarTabla(columna) {
+      const tabla = document.getElementById('tablaPermisos');
+      const filas = Array.from(tabla.querySelectorAll('tbody tr'));
+      const ascendente = tabla.dataset.orden === columna ? tabla.dataset.asc !== 'true' : true;
+
+      filas.sort((a, b) => {
+        const aText = a.cells[columna].textContent.trim().toLowerCase();
+        const bText = b.cells[columna].textContent.trim().toLowerCase();
+        return ascendente ? aText.localeCompare(bText) : bText.localeCompare(aText);
+      });
+
+      const cuerpo = tabla.querySelector('tbody');
+      filas.forEach(fila => cuerpo.appendChild(fila));
+
+      tabla.dataset.orden = columna;
+      tabla.dataset.asc = ascendente;
+    }
+  </script>
+</head>
+<body>
+  <header>
+    <h1>Administrador de Permisos</h1>
+    <a href=\"/dashboard\" class=\"volver\">⬅ Volver al Dashboard</a>
+  </header>
+  <div class=\"contenido\">
+    {% if mensaje %}
+      <div class=\"mensaje\">{{ mensaje }}</div>
+    {% endif %}
+
+    <form method=\"POST\" class=\"formulario\">
+      <input type=\"text\" name=\"usuario\" placeholder=\"Usuario\" required>
+      <select name=\"modulo\" required>
+        <option value=\"\">-- Módulo --</option>
+        {% for m in modulos %}<option value=\"{{m}}\">{{m}}</option>{% endfor %}
+      </select>
+      <select name=\"accion\" required>
+        <option value=\"\">-- Acción --</option>
+        {% for a in acciones %}<option value=\"{{a}}\">{{a}}</option>{% endfor %}
+      </select>
+      <button type=\"submit\">➕ Agregar</button>
+      <button type=\"submit\" name=\"eliminar\" value=\"1\">🗑️ Eliminar</button>
+    </form>
+
+    <div class=\"tabla-container\">
+      <table id=\"tablaPermisos\" data-orden=\"-1\" data-asc=\"true\">
+        <thead>
+          <tr>
+            <th onclick=\"ordenarTabla(0)\">Usuario</th>
+            <th onclick=\"ordenarTabla(1)\">Módulo</th>
+            <th onclick=\"ordenarTabla(2)\">Acción</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in permisos %}
+          <tr>
+            <td>{{ p.usuario }}</td>
+            <td>{{ p.modulo }}</td>
+            <td>{{ p.accion }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
+Notas_Contables_Dashboard = """
+<!DOCTYPE html><html lang="es"><head>
+<meta charset="UTF-8"><title>Notas Contables</title>
+<style>
+body { background:#121212; color:#e0e0e0; font-family:Arial; margin:0; padding:0; }
+header { background:#1f1f1f; padding:10px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; position:sticky; top:0; z-index:100; }
+form { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+select,input,button { padding:6px; background:#333; color:#fdd835; border:1px solid #888; border-radius:6px; max-width:200px; }
+.container { display:flex; height:calc(100vh - 140px); }
+.lista { width:40%; overflow-y:auto; border-right:1px solid #333; padding:10px; }
+.visor { width:60%; height:100%; }
+.visor iframe { width:100%; height:100%; border:none; }
+ul { list-style:none; padding:0; }
+li { padding:10px; border-bottom:1px solid #333; cursor:pointer; }
+li:hover, .seleccionado { background:#ff9800; color:black; border-radius:4px; }
+a { color:#4FC3F7; text-decoration:none; font-weight:bold; }
+a:hover { text-decoration:underline; }
+.boton-ver { color:white; background:#2196f3; padding:4px 8px; border-radius:4px; margin-right:5px; }
+.boton-renombrar { color:white; background:#9c27b0; padding:4px 8px; border-radius:4px; }
+.paginacion { background:#1f1f1f; padding:10px; text-align:center; border-top:1px solid #333; position:sticky; bottom:0; }
+</style>
+<script>
+function mostrarPDF(url, archivo) {
+    document.getElementById('visor-pdf').src = url;
+    sessionStorage.setItem('archivoActual', archivo);
+    sessionStorage.setItem('scrollPos', document.querySelector('.lista').scrollTop);
+    const params = new URLSearchParams(window.location.search);
+    params.set('archivo', archivo);
+    history.replaceState(null, '', '?' + params.toString());
+    document.querySelectorAll('li').forEach(el => el.classList.remove('seleccionado'));
+    document.querySelector(`li[data-archivo="${archivo}"]`).classList.add('seleccionado');
+}
+window.onload=function(){
+    const archivoActual = sessionStorage.getItem('archivoActual');
+    const scrollPos = sessionStorage.getItem('scrollPos');
+    if(archivoActual){
+        document.querySelectorAll('li').forEach(el=>{
+            if(el.getAttribute('data-archivo')===archivoActual){
+                el.classList.add('seleccionado');
+            }
+        });
+    }
+    if(scrollPos){document.querySelector('.lista').scrollTop=scrollPos;}
+};
+</script>
+</head><body>
+<header>
+<form method="get">
+<input type="text" name="filtro" value="{{ filtro }}" placeholder="Buscar nombre, número, tipo...">
+<select name="carpeta" onchange="this.form.submit()">
+<option value="">Todos</option>
+{% for c in carpetas %}<option value="{{ c }}" {% if c==ruta_relativa %}selected{% endif %}>{{ c }}</option>{% endfor %}
+</select>
+<select name="subcarpeta" onchange="this.form.submit()">
+<option value="">Todos los años</option>
+{% for sc in subcarpetas %}<option value="{{ sc }}" {% if sc==subcarpeta %}selected{% endif %}>{{ sc }}</option>{% endfor %}
+</select>
+<select name="por_pagina" onchange="this.form.submit()">
+<option value="10" {% if por_pagina==10 %}selected{% endif %}>10</option>
+<option value="30" {% if por_pagina==30 %}selected{% endif %}>30</option>
+<option value="50" {% if por_pagina==50 %}selected{% endif %}>50</option>
+</select>
+<button type="submit">Filtrar</button>
+</form>
+<div style="display: flex; align-items: center; gap: 15px;">
+    <span>📁 Documentos: {{ cantidad_archivos }}</span>
+    <a href="{{ url_for('dashboard') }}" style="color:white;background:red;padding:6px 12px;border-radius:4px; text-decoration: none;">⏪ Salir</a>
+</div>
+
+</header>
+
+<div class="paginacion">
+Página {{ pagina }} de {{ total_paginas }}
+{% if pagina>1 %}<a href="?pagina={{ pagina-1 }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&subcarpeta={{ subcarpeta }}&filtro={{ filtro }}">Anterior</a>{% endif %}
+{% for p in range(1,total_paginas+1) %}
+  {% if p<=3 or p>total_paginas-3 or (p>=pagina-2 and p<=pagina+2) %}
+    <a href="?pagina={{ p }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&subcarpeta={{ subcarpeta }}&filtro={{ filtro }}" {% if p==pagina %}style="font-weight:bold;"{% endif %}>{{ p }}</a>
+  {% elif p==4 or p==total_paginas-3 %}...{% endif %}
+{% endfor %}
+{% if pagina<total_paginas %}<a href="?pagina={{ pagina+1 }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&subcarpeta={{ subcarpeta }}&filtro={{ filtro }}">Siguiente</a>{% endif %}
+</div>
+
+<div class="container">
+<div class="lista">
+<ul>
+{% for sede, archivo, nombre_archivo, fecha in archivos %}
+<li data-archivo="{{ archivo }}">
+<strong>{{ nombre_archivo }}</strong><br>🗓 {{ fecha|datetimeformat }}<br>
+<a href="javascript:void(0);" class="boton-ver" onclick="mostrarPDF('{{ url_for('servir_pdf_notas', sede='NC', archivo=archivo) }}','{{ archivo }}')">Ver PDF</a>
+<a href="{{ url_for('renombrar_notas', archivo=archivo) }}" class="boton-renombrar">Renombrar</a>
+</li>
+{% endfor %}
+</ul>
+</div>
+<div class="visor">
+<iframe id="visor-pdf" src="{% if archivo_actual %}{{ url_for('servir_pdf_notas', sede='NC', archivo=archivo_actual) }}{% endif %}"></iframe>
+</div>
+</div>
+
+<div class="paginacion">
+Página {{ pagina }} de {{ total_paginas }}
+{% if pagina>1 %}<a href="?pagina={{ pagina-1 }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&subcarpeta={{ subcarpeta }}&filtro={{ filtro }}">Anterior</a>{% endif %}
+{% for p in range(1,total_paginas+1) %}
+  {% if p<=3 or p>total_paginas-3 or (p>=pagina-2 and p<=pagina+2) %}
+    <a href="?pagina={{ p }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&subcarpeta={{ subcarpeta }}&filtro={{ filtro }}" {% if p==pagina %}style="font-weight:bold;"{% endif %}>{{ p }}</a>
+  {% elif p==4 or p==total_paginas-3 %}...{% endif %}
+{% endfor %}
+{% if pagina<total_paginas %}<a href="?pagina={{ pagina+1 }}&por_pagina={{ por_pagina }}&carpeta={{ ruta_relativa }}&subcarpeta={{ subcarpeta }}&filtro={{ filtro }}">Siguiente</a>{% endif %}
+</div>
+</body></html>
+"""
+
+
+
+Añadir_CO = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>➕ Adicionar Centro de Operación</title>
+    <style>
+        body {
+            background-color: #121212;
+            color: #e0e0e0;
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+        }
+        .formulario {
+            max-width: 500px;
+            margin: auto;
+            background-color: #1f1f1f;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 0 10px #00000088;
+        }
+        label {
+            display: block;
+            margin-top: 10px;
+            font-weight: bold;
+        }
+        input, button {
+            width: 100%;
+            padding: 10px;
+            margin-top: 5px;
+            border-radius: 8px;
+            border: 1px solid #888;
+            background-color: #333;
+            color: #fdd835;
+        }
+        button {
+            margin-top: 15px;
+            background-color: #007bff;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        .mensaje {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #333;
+            border-left: 5px solid #fdd835;
+            color: #fdd835;
+        }
+    </style>
+    <script>
+        function normalizarTexto(input) {
+            let original = input.value;
+            let texto = original.normalize("NFD").replace(/\p{Diacritic}/gu, "");
+            texto = texto.replace(/[^a-zA-Z0-9 \\-ñÑ]/g, "").toUpperCase().trim();
+
+            if (texto !== original) {
+                input.value = texto;
+                mostrarMensaje("⚠️ Se han corregido caracteres especiales y espacios.");
+            }
+        }
+
+        function mostrarMensaje(mensaje) {
+            let div = document.createElement("div");
+            div.className = "mensaje";
+            div.innerText = mensaje;
+            document.body.appendChild(div);
+            setTimeout(() => div.remove(), 3000);
+        }
+    </script>
+</head>
+<body>
+    <div class="formulario">
+        <h2>➕ Adicionar Centro de Operación</h2>
+
+        <form action="/notas/guardar-co" method="post">
+            <label for="codigo_co">Código C.O.</label>
+            <input type="text" id="codigo_co" name="codigo_co" required pattern="\\d+" maxlength="10" title="Solo números">
+
+            <label for="nombre_co">Nombre del Centro de Operación</label>
+            <input type="text" id="nombre_co" name="nombre_co" required maxlength="50" oninput="normalizarTexto(this)">
+
+            <button type="submit">💾 Guardar C.O.</button>
+        </form>
+
+        <form action="/notas/renombrar-co" method="post">
+            <label for="editar_co">Editar Nombre de C.O.</label>
+            <input type="text" id="editar_co" name="editar_co" placeholder="Nuevo nombre" required maxlength="50" oninput="normalizarTexto(this)">
+            <button type="submit">✏️ Renombrar</button>
+        </form>
+
+        <form action="/notas/inhabilitar-co" method="post">
+            <label for="inhabilitar_co">Inhabilitar C.O.</label>
+            <input type="text" id="inhabilitar_co" name="inhabilitar_co" placeholder="Código C.O." required pattern="\\d+" maxlength="10">
+            <button type="submit">🚫 Inhabilitar</button>
+        </form>
+
+        <form action="/notas/dashboard">
+            <button type="submit">⬅️ Volver al Dashboard</button>
+        </form>
+    </div>
+</body>
+</html>
+"""
+
+
+Añadir_TipoDocumento = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>➕ Adicionar Tipo de Documento</title>
+    <style>
+        body {
+            background-color: #121212;
+            color: #e0e0e0;
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+        }
+        .formulario {
+            max-width: 500px;
+            margin: auto;
+            background-color: #1f1f1f;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 0 10px #00000088;
+        }
+        label {
+            display: block;
+            margin-top: 10px;
+            font-weight: bold;
+        }
+        input, button {
+            width: 100%;
+            padding: 10px;
+            margin-top: 5px;
+            border-radius: 8px;
+            border: 1px solid #888;
+            background-color: #333;
+            color: #fdd835;
+        }
+        button {
+            margin-top: 15px;
+            background-color: #28a745;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #218838;
+        }
+        .mensaje {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #333;
+            border-left: 5px solid #fdd835;
+            color: #fdd835;
+        }
+    </style>
+    <script>
+        function normalizarTexto(input) {
+            let original = input.value;
+            let texto = original.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+            texto = texto.replace(/[^A-Z0-9 \\-Ñ]/gi, "").toUpperCase().trim();
+
+            if (texto !== original) {
+                input.value = texto;
+                mostrarMensaje("⚠️ Se han corregido caracteres especiales o espacios.");
+            }
+        }
+
+        function mostrarMensaje(mensaje) {
+            let div = document.createElement("div");
+            div.className = "mensaje";
+            div.innerText = mensaje;
+            document.body.appendChild(div);
+            setTimeout(() => div.remove(), 3000);
+        }
+    </script>
+</head>
+<body>
+    <div class="formulario">
+        <h2>➕ Adicionar Tipo de Documento</h2>
+
+        <form action="/notas/guardar-tipo" method="post">
+            <label for="tipo_doc">Tipo (Sigla)</label>
+            <input type="text" id="tipo_doc" name="tipo_doc" required maxlength="10" oninput="normalizarTexto(this)" placeholder="Ej: NOC">
+
+            <label for="nombre_tipo">Nombre del Tipo de Documento</label>
+            <input type="text" id="nombre_tipo" name="nombre_tipo" required maxlength="50" oninput="normalizarTexto(this)" placeholder="Ej: NOTA CONTABLE">
+
+            <button type="submit">💾 Guardar Tipo</button>
+        </form>
+
+        <form action="/notas/renombrar-tipo" method="post">
+            <label for="editar_tipo">Renombrar Tipo</label>
+            <input type="text" id="editar_tipo" name="editar_tipo" required maxlength="10" oninput="normalizarTexto(this)" placeholder="Ej: NOC">
+
+            <label for="nuevo_nombre">Nuevo Nombre</label>
+            <input type="text" id="nuevo_nombre" name="nuevo_nombre" required maxlength="50" oninput="normalizarTexto(this)" placeholder="Ej: NOTA DE AJUSTE">
+
+            <button type="submit">✏️ Renombrar</button>
+        </form>
+
+        <form action="/notas/inhabilitar-tipo" method="post">
+            <label for="inhabilitar_tipo">Inhabilitar Tipo</label>
+            <input type="text" id="inhabilitar_tipo" name="inhabilitar_tipo" required maxlength="10" oninput="normalizarTexto(this)" placeholder="Ej: NOC">
+            <button type="submit">🚫 Inhabilitar</button>
+        </form>
+
+        <form action="/notas/dashboard">
+            <button type="submit">⬅️ Volver al Dashboard</button>
+        </form>
+    </div>
+</body>
+</html>
+"""
+
+Adicionar_Documento = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>➕ Adicionar Documento</title>
+    <style>
+        body {
+            background-color: #121212;
+            color: #e0e0e0;
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+        }
+        .formulario {
+            max-width: 600px;
+            margin: auto;
+            background-color: #1f1f1f;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 0 10px #00000088;
+        }
+        label {
+            display: block;
+            margin-top: 10px;
+            font-weight: bold;
+        }
+        select, input, button {
+            width: 100%;
+            padding: 10px;
+            margin-top: 5px;
+            border-radius: 8px;
+            border: 1px solid #888;
+            background-color: #333;
+            color: #fdd835;
+        }
+        button {
+            margin-top: 15px;
+            background-color: #17a2b8;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #138496;
+        }
+        .etiqueta {
+            font-size: 0.9em;
+            color: #00e676;
+            margin-left: 10px;
+        }
+        .campo-par {
+            display: flex;
+            align-items: center;
+        }
+    </style>
+    <script>
+        function mostrarEtiquetaEmpresa() {
+            const empresa = document.getElementById('empresa').value;
+            const etiqueta = document.getElementById('nombre_empresa');
+            etiqueta.textContent = empresa === 'SC' ? 'SUPERTIENDAS CAÑAVERAL SAS' : (empresa === 'LG' ? 'LA GALERIA Y CIA SAS' : '');
+        }
+        function convertirMayusculas(e) {
+            e.value = e.value.toUpperCase();
+        }
+        function rellenarNumero(e) {
+            let val = e.value.replace(/\\D/g, '');
+            if (val.length > 8) val = val.slice(0, 8);
+            e.value = val.padStart(8, '0');
+        }
+    </script>
+</head>
+<body>
+    <div class="formulario">
+        <h2>➕ Adicionar Documento</h2>
+        <form action="/notas/guardar-documento" method="post" enctype="multipart/form-data">
+            <label for="empresa">Empresa</label>
+            <select name="empresa" id="empresa" required onchange="mostrarEtiquetaEmpresa()">
+                <option value="">Seleccione empresa</option>
+                <option value="SC">SC</option>
+                <option value="LG">LG</option>
+            </select>
+            <div id="nombre_empresa" class="etiqueta"></div>
+
+            <label for="anio">Año</label>
+            <input type="number" name="anio" id="anio" required min="2020" max="2100">
+
+            <label for="mes">Mes</label>
+            <select name="mes" id="mes" required>
+                <option value="">Seleccione mes</option>
+                <option value="1. Enero">Enero</option>
+                <option value="2. Febrero">Febrero</option>
+                <option value="3. Marzo">Marzo</option>
+                <option value="4. Abril">Abril</option>
+                <option value="5. Mayo">Mayo</option>
+                <option value="6. Junio">Junio</option>
+                <option value="7. Julio">Julio</option>
+                <option value="8. Agosto">Agosto</option>
+                <option value="9. Septiembre">Septiembre</option>
+                <option value="10. Octubre">Octubre</option>
+                <option value="11. Noviembre">Noviembre</option>
+                <option value="12. Diciembre">Diciembre</option>
+            </select>
+
+            <label for="co">Centro de Operación (C.O.)</label>
+            <input type="text" name="co" id="co" required oninput="convertirMayusculas(this)">
+            <div class="etiqueta" id="nombre_co"><!-- Aquí puedes mostrar el nombre del C.O. desde JS o servidor --></div>
+
+            <label for="tipo_doc">Tipo de Documento</label>
+            <input type="text" name="tipo_doc" id="tipo_doc" required oninput="convertirMayusculas(this)">
+            <div class="etiqueta" id="nombre_tipo"><!-- Aquí puedes mostrar el nombre del tipo desde JS o servidor --></div>
+
+            <label for="numero_doc">Número del Documento</label>
+            <input type="text" name="numero_doc" id="numero_doc" required oninput="rellenarNumero(this)">
+
+            <label for="soportes">Soportes (PDF o Imagen, hasta 6)</label>
+            <input type="file" name="soportes" id="soportes" accept=\"application/pdf,image/*\" multiple required>
+
+            <button type="submit">💾 Guardar Documento</button>
+        </form>
+
+        <form action="/notas/dashboard">
+            <button type="submit">⬅️ Volver al Dashboard</button>
+        </form>
+    </div>
+</body>
+</html>
+"""
+
+
+
+
+
+
+
+@app.route('/logout_forzado')
+def logout_forzado():
+    liberar_en_uso(session.get('session_id', ''))  # 🔥 Libera bloqueos para esta sesión
+    session.clear()
+    return redirect(url_for('login'))
+
+
+
+
+## permite ver que documento estasiendo visaulizado por otro usuario , se tiñe de verde claro 
+    
+@app.route('/causacion')
+def vista_causacion():
+    if not session.get('autenticado'):
+        return redirect(url_for('login'))
+
+    archivo_actual = request.args.get('archivo', '')
+    sedes_seleccionadas = request.args.getlist('sede') or ['Todo']
+    if 'Todo' in sedes_seleccionadas:
+        sedes_seleccionadas = list(carpetas_base.keys())
+
+    ruta_relativa = request.args.get('carpeta', '__all__')
+    filtro = request.args.get('filtro', '').lower()
+    pagina = int(request.args.get('pagina', 1))
+    por_pagina = int(request.args.get('por_pagina', 50))
+
+    archivos = []
+    carpetas = []
+
+    for sede in sedes_seleccionadas:
+        base = carpetas_base.get(sede)
+        if not base:
+            continue
+
+        # Buscar carpetas hijas
+        for root, dirs, _ in os.walk(base):
+            for d in dirs:
+                rel = os.path.relpath(os.path.join(root, d), base)
+                carpetas.append(rel.replace("\\", "/"))
+
+        # 🔒 No cargar archivos si no hay carpeta ni filtro
+        if ruta_relativa == "__all__" and not filtro:
+            
+        #if carpeta and carpeta != "__all__" and not rel.startswith(carpeta):
+    
+
+            continue
+
+        if ruta_relativa == "__all__":
+            for root, _, files in os.walk(base):
+                for f in files:
+                    if f.lower().endswith('.pdf') and filtro in f.lower():
+                        ruta = os.path.join(root, f)
+                        try:
+                            fecha = os.path.getmtime(ruta)
+                            rel_pdf = os.path.relpath(ruta, base).replace(os.sep, '/')
+                            archivos.append((sede, rel_pdf, fecha))
+                        except PermissionError:
+                            print(f"⚠️ Sin permiso para acceder a: {ruta}")
+                        except Exception as e:
+                            print(f"❌ Error con archivo {ruta}: {e}")
+        else:
+            dir_actual = os.path.join(base, ruta_relativa)
+            if os.path.exists(dir_actual):
+                for f in os.listdir(dir_actual):
+                    if f.lower().endswith('.pdf') and filtro in f.lower():
+                        ruta = os.path.join(dir_actual, f)
+                        try:
+                            fecha = os.path.getmtime(ruta)
+                            rel_pdf = os.path.join(ruta_relativa, f).replace("\\", "/")
+                            archivos.append((sede, rel_pdf, fecha))
+                        except PermissionError:
+                            print(f"⚠️ Sin permiso para acceder a: {ruta}")
+                        except Exception as e:
+                            print(f"❌ Error con archivo {ruta}: {e}")
+
+    carpetas = sorted(set(carpetas))
+    archivos.sort(key=lambda x: x[2], reverse=True)
+
+    total_archivos = len(archivos)
+    total_paginas = max(1, (total_archivos + por_pagina - 1) // por_pagina)
+    inicio = (pagina - 1) * por_pagina
+    fin = inicio + por_pagina
+    archivos_pagina = archivos[inicio:fin]
+
+    estados = obtener_ultimo_estado()
+    historiales = {a[1].split("/")[-1]: historial_por_archivo(a[1].split("/")[-1]) for a in archivos_pagina}
+
+    bloqueos = obtener_bloqueos()
+    archivos_ocupados = {k: v for k, v in bloqueos.items() if v['session_id'] != session.get('session_id', '')}
+
+    return render_template_string(
+        index_html,
+        sedes=list(carpetas_base.keys()) + ['Todo'],
+        sede=sedes_seleccionadas,
+        carpetas=carpetas,
+        archivos=archivos_pagina,
+        estados=estados,
+        historiales=historiales,
+        ruta_relativa=ruta_relativa,
+        filtro=filtro,
+        archivo_actual=archivo_actual,
+        cantidad_archivos=total_archivos,
+        pagina=pagina,
+        total_paginas=total_paginas,
+        por_pagina=por_pagina,
+        archivos_ocupados=archivos_ocupados
+    )
+  # 🔥 PASA info de bloqueos al template
+    
+    
+    
+## se encarga de mostrar en la lista de archivos pdf en el modulo causacioon
+from flask import send_file, abort, flash, redirect, url_for, session
+from urllib.parse import unquote
+
+@app.route('/ver/<sede>/<path:archivo>')
+def servir_pdf(sede, archivo):
+    carpeta_base = carpetas_base.get(sede)
+    if not carpeta_base:
+        return abort(404, "⚠️ Sede no válida.")
+
+    archivo = unquote(archivo)  # 🔥 Decodifica cualquier %20, %C3%A1, etc.
+    ruta = os.path.join(carpeta_base, archivo.replace("/", os.sep))
+
+    try:
+        if os.path.exists(ruta):
+            if session.get('autenticado'):
+                liberar_archivos_y_marcar_nuevo(f"{sede}/{archivo}", session['usuario'], session['session_id'])
+            return send_file(ruta, mimetype='application/pdf')
+        else:
+            return abort(404, "⚠️ El archivo no existe.")
+    except PermissionError:
+        return abort(403, "🚫 No tienes permisos para abrir el archivo.")
+    except Exception as e:
+        return abort(500, f"❌ Error inesperado: {str(e)}")
+
+
+
+
+# sirve para renombrar en el modulo de causacion
+
+@app.route('/renombrar/<sede>/<path:archivo>', methods=['GET', 'POST'])
+def renombrar(sede, archivo):
+    carpeta_base = carpetas_base.get(sede)
+    if not carpeta_base:
+        flash(f"⚠️ Carpeta base no encontrada para la sede {sede}.")
+        return redirect(url_for('vista_causacion', sede=sede))
+
+    ruta_original = os.path.normpath(os.path.join(carpeta_base, archivo.replace("/", os.sep)))
+    if not os.path.exists(ruta_original):
+        flash(f"⚠️ Archivo original no encontrado: {ruta_original}")
+        return redirect(url_for('vista_causacion', sede=sede))
+
+    if request.method == 'POST':
+        nuevo_nombre = request.form.get('nuevo_nombre', '').strip()
+        archivos_adicionales = request.files.getlist('archivos_adicionales')
+        destino = request.form.get('destino', 'original')
+        descargar_copia = request.form.get('descargar_copia') == '1'
+
+        if not nuevo_nombre:
+            flash("Por favor ingrese un nuevo nombre.")
+            return redirect(url_for('renombrar', sede=sede, archivo=archivo))
+
+        # Asegurar extensión .pdf
+        nuevo_nombre_pdf = secure_filename(nuevo_nombre)
+        if not nuevo_nombre_pdf.lower().endswith('.pdf'):
+            nuevo_nombre_pdf += '.pdf'
+
+        # Determinar carpeta destino
+        if destino == 'original':
+            carpeta_destino = os.path.dirname(ruta_original)
+        elif destino == 'causadas':
+            sedes_causadas = {
+                'CYS': r"W:\ACREEDORES_CYS\CAUSADAS",
+                'DOM': r"V:\ACREEDORES_DOM\CAUSADAS",
+                'TIC': r"U:\ACREEDORES_TIC\CAUSADAS",
+                'MER': r"X:\CAUSADAS"
+            }
+            sede_base = sede.replace('_C', '')
+            carpeta_causadas = sedes_causadas.get(sede_base)
+            if not carpeta_causadas:
+                flash(f"No se encontró la carpeta CAUSADAS para {sede_base}.")
+                return redirect(url_for('renombrar', sede=sede, archivo=archivo))
+            subcarpeta = os.path.relpath(os.path.dirname(ruta_original), carpeta_base)
+            carpeta_destino = os.path.normpath(os.path.join(carpeta_causadas, subcarpeta))
+        else:
+            flash("Destino inválido.")
+            return redirect(url_for('renombrar', sede=sede, archivo=archivo))
+
+        os.makedirs(carpeta_destino, exist_ok=True)
+        nueva_ruta = os.path.join(carpeta_destino, nuevo_nombre_pdf)
+
+        try:
+            if archivos_adicionales and any(f.filename for f in archivos_adicionales):
+                from PyPDF2 import PdfMerger
+                merger = PdfMerger()
+                merger.append(ruta_original)
+                temp_paths = []
+                for pdf in archivos_adicionales:
+                    if pdf.filename:
+                        temp_path = os.path.join(tempfile.mkdtemp(), secure_filename(pdf.filename))
+                        pdf.save(temp_path)
+                        merger.append(temp_path)
+                        temp_paths.append(temp_path)
+                with open(nueva_ruta, 'wb') as f_out:
+                    merger.write(f_out)
+                merger.close()
+                for path in temp_paths:
+                    os.remove(path)
+                os.remove(ruta_original)  # Borra el original si combinó
+                flash("Archivo combinado y renombrado correctamente.")
+            else:
+                if ruta_original != nueva_ruta:
+                    os.rename(ruta_original, nueva_ruta)
+                    flash("Archivo renombrado correctamente.")
+                else:
+                    flash("El nombre es igual al original. No se realizó ningún cambio.")
+            if descargar_copia:
+                return send_file(nueva_ruta, as_attachment=True, download_name=nuevo_nombre_pdf)
+        except Exception as e:
+            flash(f"Error durante el renombrado: {e}")
+
+        # 🔁 Al terminar, volver a la vista con los filtros aplicados
+        return redirect(url_for('vista_causacion',
+            sede=sede,
+            carpeta=request.args.get("carpeta", ""),
+            filtro=request.args.get("filtro", ""),
+            pagina=request.args.get("pagina", 1),
+            por_pagina=request.args.get("por_pagina", 50)
+        ))
+
+    nombre_actual = os.path.basename(archivo)
+    return render_template_string(renombrar_html,
+        archivo=archivo,
+        nombre_actual=nombre_actual,
+        sede=sede,
+        carpeta=request.args.get("carpeta", ""),
+        filtro=request.args.get("filtro", ""),
+        pagina=request.args.get("pagina", 1),
+        por_pagina=request.args.get("por_pagina", 50)
+    )
+    
+    
+## para descargar listados de excel desde el modulo de causaciones
+from flask import request, send_file
+import os
+import pandas as pd
+from io import BytesIO
+
+@app.route('/exportar-excel')
+def exportar_excel():
+    sede = request.args.getlist("sede")
+    carpeta = request.args.get("carpeta", "__all__")
+    filtro = request.args.get("filtro", "").lower()
+
+    registros = []
+
+    for s in sede:
+        base = carpetas_base.get(s, "")
+        if not base or not os.path.isdir(base):
+            continue
+
+        for root, dirs, files in os.walk(base):
+            rel = os.path.relpath(root, base).replace("\\", "/")
+
+            if carpeta != "__all__" and not rel.startswith(carpeta):
+                continue
+
+            for f in files:
+                if f.lower().endswith(".pdf") and (not filtro or filtro in f.lower()):
+                    registros.append({
+                        "Sede": s,
+                        "Carpeta": rel,
+                        "Nombre del Archivo": f
+                    })
+
+    # Siempre crear DataFrame con encabezados, aunque esté vacío
+    df = pd.DataFrame(registros, columns=["Sede", "Carpeta", "Nombre del Archivo"])
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Documentos")
+
+    output.seek(0)
+    return send_file(output,
+                     download_name="listado_causaciones.xlsx",
+                     as_attachment=True,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    
+    
+    
+##### para borra archivos de documentos causacionessolo usuarios con permisos especiales o usuarios especificos    
+    
+from send2trash import send2trash
+
+
+
+@app.route("/borrar-documento", methods=["POST"])
+def borrar_documento():
+    if session.get("usuario") not in ["alejandra", "master", "ricardo", "admin"]:
+        return "No autorizado", 403
+
+    data = request.get_json()
+    sede = data.get("sede")
+    archivo = data.get("archivo")
+
+    base_path = carpetas_base.get(sede, "")
+    ruta_completa = os.path.join(base_path, archivo.replace("/", os.sep))
+
+    if not os.path.exists(ruta_completa):
+        return "Archivo no encontrado", 404
+
+    try:
+        send2trash(ruta_completa)
+        return "El archivo fue movido a la papelera correctamente"
+    except Exception as e:
+        return f"Error al borrar archivo: {str(e)}", 500
+    
+
+
+########################################################################
+#
+# login
+#
+#############################################################################
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if session.get('autenticado'):
+        return redirect(url_for('dashboard'))
+
+    error = None
+    if request.method == 'POST':
+        usuario = request.form['usuario']
+        clave = request.form['clave']
+        if usuario in usuarios_validos and usuarios_validos[usuario] == clave:
+            session.permanent = True  # ← Mantiene sesión activa
+            session['autenticado'] = True
+            session['usuario'] = usuario
+            session['session_id'] = str(uuid.uuid4())  # 🔥 Genera identificador único para esta sesión
+            return redirect(url_for('dashboard'))
+        else:
+            error = "Usuario o contraseña incorrectos"
+
+    return render_template_string(login_html, error=error)
+
+
+
+
+## libera los archivos visualizados y redirige al dasboard
+@app.route('/logout')
+def logout():
+    liberar_en_uso(session.get('session_id', ''))  # ✅ Libera archivos
+    session.clear()
+    return redirect(url_for('dashboard'))
+
+##  crea una nueva ruta flask
+@app.route('/visualizar_archivo', methods=['POST'])
+def visualizar_archivo():
+    data = request.get_json()
+    archivo = data.get("archivo")
+    usuario = data.get("usuario")
+    session_id = session.get("session_id", "")
+    if archivo and usuario and session_id:
+        liberar_archivos_y_marcar_nuevo(archivo, usuario, session_id)
+        return jsonify({"ok": True})
+    return jsonify({"ok": False}), 400
+
+
+
+@app.route('/dashboard')
+def dashboard():
+    if not session.get('autenticado'):
+        return redirect(url_for('login'))
+    return render_template_string(dashboard_html)
+
+
+@app.route('/')
+def home():
+    return redirect(url_for('dashboard'))
+
+
+
+
+@app.template_filter('datetimeformat')
+def datetimeformat(value, format='%Y-%m-%d %H:%M'):
+    return datetime.fromtimestamp(value).strftime(format)
+
+
+
+
+# PARA LA SEGURIDAD SOCIAL
+CSV_TERCEROS_SS = r"D:/PERFIL/Escritorio/Escritorio/100. Proyecto/Proyecto Gestor Documental/bd/ss_terceros.csv"
+CARPETA_SS = carpetas_base.get('SS', '')
+CSV_TERCEROS_SS = os.path.join(CARPETA_SS, "terceros.csv")
+UPLOAD_FOLDER = CARPETA_SS  # Carpeta base para guardar archivos
+
+import pandas as pd
+
+# =========================
+# 🔸 Función preparar_carpeta_guardado
+# =========================
+def preparar_carpeta_guardado(nit, fecha_pago):
+    anio = datetime.strptime(fecha_pago, '%Y-%m-%d').year  # Extrae el año desde fecha_pago
+    carpeta_anio = os.path.join(CARPETA_SS, str(anio))
+    if not os.path.exists(carpeta_anio):
+        os.makedirs(carpeta_anio)
+
+    # Carga de datos de terceros
+    data = pd.read_csv(CSV_TERCEROS_SS, dtype=str).fillna('')
+    tercero = data[data['NIT'] == nit]
+    if tercero.empty:
+        raise ValueError(f"No se encontró tercero con NIT {nit}")
+
+    fila = tercero.iloc[0]
+    nombre_completo = f"{fila['Primer_Apellido']} {fila['Segundo_Apellido']} {fila['Primer_Nombre']} {fila['Segundo_Nombre']}".strip()
+    subcarpeta_nombre = f"S.S.Planilla _ {nombre_completo} {nit}"
+    ruta_subcarpeta = os.path.join(carpeta_anio, subcarpeta_nombre)
+
+    if not os.path.exists(ruta_subcarpeta):
+        os.makedirs(ruta_subcarpeta)
+    
+    return ruta_subcarpeta
+
+ 
+ 
+    
+    
+    
+@app.route('/seguridad-social')
+def seguridad_social():
+    filtro = request.args.get('filtro', '').lower()
+    carpeta = request.args.get('carpeta', '')
+    subcarpeta = request.args.get('subcarpeta', '')
+    pagina = int(request.args.get('pagina', 1))
+    por_pagina = int(request.args.get('por_pagina', 10))
+    archivo_actual = request.args.get('archivo', '')
+
+    base_path = CARPETA_SS
+    archivos = []
+    carpetas = []
+    subcarpetas_set = set()
+
+    for root, dirs, files in os.walk(base_path):
+        rel_path = os.path.relpath(root, base_path)
+        if rel_path == ".":
+            carpetas = dirs
+        for d in dirs:
+            if d.isdigit():
+                subcarpetas_set.add(d)
+        for f in files:
+            if f.lower().endswith('.pdf'):
+                full_path = os.path.join(root, f)
+                sede = "SS"
+                if carpeta and not rel_path.startswith(carpeta):
+                    continue
+                if subcarpeta and subcarpeta not in rel_path:
+                    continue
+                if filtro and filtro not in f.lower():
+                    continue
+                ruta_relativa = os.path.relpath(full_path, base_path)
+                nombre_archivo = os.path.basename(f)  # Obtiene solo el nombre del archivo
+                archivos.append((sede, ruta_relativa, nombre_archivo, os.path.getmtime(full_path)))
+
+    # Ordenar por fecha (timestamp)
+    archivos.sort(key=lambda x: x[3], reverse=True)
+    total_paginas = (len(archivos) + por_pagina - 1) // por_pagina
+    archivos_pagina = archivos[(pagina-1)*por_pagina : pagina*por_pagina]
+
+    return render_template_string(SeguridadSocial_html,
+        archivos=archivos_pagina,
+        carpetas=carpetas,
+        subcarpetas=sorted(list(subcarpetas_set)),
+        cantidad_archivos=len(archivos),
+        pagina=pagina,
+        total_paginas=total_paginas,
+        por_pagina=por_pagina,
+        filtro=filtro,
+        ruta_relativa=carpeta,
+        subcarpeta=subcarpeta,
+        archivo_actual=archivo_actual,
+        datetimeformat=datetimeformat
+    )
+    
+    
+
+@app.route('/renombrar-planilla/<path:archivo>', methods=['GET', 'POST'])
+def renombrar_planilla(archivo):
+    if not session.get('autenticado'):
+        return redirect(url_for('login'))
+    ruta_actual = os.path.join(CARPETA_SS, archivo)
+    nombre_actual = os.path.basename(archivo)  # Aquí obtenemos el nombre del archivo (incluye .pdf)
+
+    if request.method == 'POST':
+        nuevo_nombre = request.form.get('nuevo_nombre')
+        if nuevo_nombre:
+            ruta_nueva = os.path.join(CARPETA_SS, f"{nuevo_nombre}.pdf")
+            os.rename(ruta_actual, ruta_nueva)
+            flash("Planilla renombrada exitosamente")
+            return redirect(url_for('seguridad_social'))
+
+    return render_template_string(SeguridadSocial_RenombrarPlanilla_html, archivo=archivo, nombre_actual=nombre_actual)
+
+@app.route('/nuevo-tercero', methods=['GET', 'POST'])
+def nuevo_tercero():
+    if not session.get('autenticado'):
+        return redirect(url_for('login'))
+
+    if request.method == 'POST':
+        nuevo = {
+            'NIT': request.form.get('NIT').strip(),
+            'Primer_Apellido': request.form.get('Primer_Apellido').strip(),
+            'Segundo_Apellido': request.form.get('Segundo_Apellido', '').strip(),
+            'Primer_Nombre': request.form.get('Primer_Nombre').strip(),
+            'Segundo_Nombre': request.form.get('Segundo_Nombre', '').strip(),
+            'Correo_1': request.form.get('Correo_1').strip(),
+            'Correo_2': request.form.get('Correo_2', '').strip(),
+            'Celular_1': request.form.get('Celular_1').strip(),
+            'Celular_2': request.form.get('Celular_2', '').strip()
+        }
+
+        # Cargar datos existentes
+        try:
+            data = pd.read_csv(CSV_TERCEROS_SS, dtype=str).fillna('')
+        except UnicodeDecodeError:
+            data = pd.read_csv(CSV_TERCEROS_SS, dtype=str, encoding='latin-1').fillna('')
+
+        # Buscar el último ID (si el CSV está vacío, comienza en 1)
+        if 'ID' in data.columns and not data.empty:
+            ultimo_id = pd.to_numeric(data['ID'], errors='coerce').max()
+            nuevo_id = 1 if pd.isna(ultimo_id) else int(ultimo_id) + 1
+        else:
+            nuevo_id = 1
+
+        # Crear DataFrame con el nuevo registro
+        nuevo_df = pd.DataFrame([{'ID': nuevo_id, **nuevo}])
+
+        # Concatenar con el DataFrame original
+        data = pd.concat([data, nuevo_df], ignore_index=True)
+
+        guardar_terceros_ss(data)
+        flash(f"Tercero {nuevo['Primer_Apellido']} {nuevo['Primer_Nombre']} ({nuevo['NIT']}) registrado exitosamente con ID {nuevo_id}.")
+        return redirect(url_for('seguridad_social'))
+
+    return render_template_string(SeguridadSocial_NuevoTercero_html)
+
+# acicionar planilla , carga el listado de terceros para validacion
+import json
+
+
+
+
+# Ruta para buscar tercero y devolver JSON válido
+from flask import jsonify, request
+import pandas as pd
+import os
+
+CSV_TERCEROS_SS = r"D:/PERFIL/Escritorio/Escritorio/100. Proyecto/Proyecto Gestor Documental/bd/ss_terceros.csv"
+
+
+# 🏷️ Ruta para buscar el tercero por NIT y redirigir a edición
+@app.route('/buscar_tercero_json')
+def buscar_tercero_json():
+    if not session.get('autenticado'):
+        return jsonify({"error": "No autorizado"}), 401
+
+    nit = request.args.get('nit', '').strip()
+    if not nit:
+        return jsonify({"error": "Falta el NIT"}), 400
+
+    if not os.path.exists(CSV_TERCEROS_SS):
+        return jsonify({"error": "No existe archivo de terceros"}), 500
+
+    try:
+        data = pd.read_csv(CSV_TERCEROS_SS, dtype=str).fillna('')
+        tercero = data[data['NIT'] == nit]
+        if not tercero.empty:
+            fila = tercero.iloc[0]
+            nombre_completo = f"{fila['Primer_Apellido']} {fila['Segundo_Apellido']} {fila['Primer_Nombre']} {fila['Segundo_Nombre']}".strip()
+            return jsonify({"encontrado": True, "nombre_completo": nombre_completo})
+        else:
+            return jsonify({"encontrado": False})
+    except Exception as e:
+        return jsonify({"error": f"Error al leer CSV: {str(e)}"}), 500
+
+
+
+@app.route('/buscar_tercero_form', methods=['GET', 'POST'])
+def buscar_tercero_form():
+    if not session.get('autenticado'):
+        return redirect(url_for('login'))
+
+    error = None
+    if request.method == 'POST':
+        nit = request.form.get("NIT")
+        if not nit:
+            error = "Por favor ingrese un NIT válido."
+            return render_template_string(SeguridadSocial_BuscarTercero_html, error=error)
+
+        nit = nit.strip()
+        data = cargar_terceros_ss()
+        tercero = data[data['NIT'] == nit]
+        if tercero.empty:
+            error = f"No se encontró un tercero con el NIT {nit}."
+            return render_template_string(SeguridadSocial_BuscarTercero_html, error=error)
+
+        return redirect(url_for('editar_tercero', nit=nit))
+
+    return render_template_string(SeguridadSocial_BuscarTercero_html)
+
+
+
+
+# Nueva ruta para buscar tercero y redirigir a la edición
+@app.route('/editar-tercero', methods=['GET', 'POST'])
+def editar_tercero_buscar():
+    if not session.get('autenticado'):
+        return redirect(url_for('login'))
+
+    error = None
+    if request.method == 'POST':
+        nit = request.form.get('NIT').strip()
+        data = cargar_terceros_ss()
+        tercero = data[data['NIT'] == nit]
+        if not tercero.empty:
+            return redirect(url_for('editar_tercero', nit=nit))
+        else:
+            error = f"Tercero con NIT {nit} no encontrado."
+
+    return render_template_string(SeguridadSocial_BuscarTercero_html, error=error)
+
+
+SeguridadSocial_BuscarTercero_html ="""
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>🔍 Buscar Tercero por NIT</title>
+    <style>
+        body { background-color: #121212; color: #e0e0e0; font-family: Arial; padding: 20px; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        .formulario-container { background-color: #1f1f1f; padding: 20px; border-radius: 10px; box-shadow: 0 0 10px rgba(255, 255, 255, 0.1); width: 350px; }
+        h2 { text-align: center; margin-bottom: 20px; color: #ffeb3b; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input { background-color: #2a2a2a; color: white; border: 1px solid #555; padding: 10px; border-radius: 4px; width: 100%; margin-bottom: 15px; }
+        button { background-color: #4CAF50; color: white; padding: 10px; width: 100%; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; }
+        button:hover { background-color: #45a049; }
+        .volver { display: block; text-align: center; margin-top: 10px; color: #f1c40f; text-decoration: none; font-weight: bold; }
+        .volver:hover { text-decoration: underline; color: #ffd700; }
+        .error { color: red; text-align: center; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+<div class="formulario-container">
+    <h2>🔍 Buscar Tercero por NIT</h2>
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <form method="post">
+        <label for="NIT">Ingrese NIT:</label>
+        <input type="text" name="NIT" placeholder="Número de Identificación" required>
+        <button type="submit">🔍 Buscar</button>
+    </form>
+    <a href="{{ url_for('seguridad_social') }}" class="volver">⏪ Volver</a>
+</div>
+</body>
+</html>
+"""
+
+
+
+
+# 🏷️ Ruta para editar el tercero por NIT (la que ya tienes)
+@app.route('/editar-tercero/<nit>', methods=['GET', 'POST'])
+def editar_tercero(nit):
+    if not session.get('autenticado'):
+        return redirect(url_for('login'))
+
+    data = cargar_terceros_ss()
+    tercero = data[data['NIT'] == nit]
+    if tercero.empty:
+        return render_template_string("<p style='color:red;'>No se encontró el tercero con NIT {{ nit }}</p><p><a href='{{ url_for('seguridad_social') }}'>⏪ Volver</a></p>", nit=nit)
+
+    tercero = tercero.iloc[0]
+
+    if request.method == 'POST':
+        nuevo = {
+            'NIT': nit,
+            'Primer_Apellido': request.form['Primer_Apellido'],
+            'Segundo_Apellido': request.form.get('Segundo_Apellido', ''),
+            'Primer_Nombre': request.form['Primer_Nombre'],
+            'Segundo_Nombre': request.form.get('Segundo_Nombre', ''),
+            'Correo_1': request.form['Correo_1'],
+            'Correo_2': request.form.get('Correo_2', ''),
+            'Celular_1': request.form['Celular_1'],
+            'Celular_2': request.form.get('Celular_2', '')
+        }
+        for campo, valor in nuevo.items():
+            data.loc[data['NIT'] == nit, campo] = valor
+
+        guardar_terceros_ss(data)
+        flash(f"Tercero {nuevo['Primer_Apellido']} {nuevo['Primer_Nombre']} ({nit}) actualizado exitosamente.")
+        return redirect(url_for('seguridad_social'))
+
+    return render_template_string(SeguridadSocial_EditarTercero_html, tercero=tercero)
+   
+
+from datetime import datetime
+import os
+
+def preparar_carpeta_guardado(nit, fecha_pago):
+    anio = datetime.strptime(fecha_pago, '%Y-%m-%d').year
+    carpeta_anio = os.path.join(CARPETA_SS, str(anio))
+    if not os.path.exists(carpeta_anio):
+        os.makedirs(carpeta_anio)
+        print(f"✅ Carpeta año creada: {carpeta_anio}")
+    else:
+        print(f"✅ Carpeta año existente: {carpeta_anio}")
+
+    data = cargar_terceros_ss()
+    print(f"📂 Buscando NIT: {nit}")
+    tercero = data[data['NIT'] == str(nit)]
+    if tercero.empty:
+        print(f"⚠️ No se encontró tercero con NIT {nit}")
+        raise ValueError(f"No se encontró tercero con NIT {nit}")
+
+    fila = tercero.iloc[0]
+    # Generar nombre completo robusto
+    nombre_completo = " ".join(filter(None, [
+        fila.get('Primer_Apellido', '').strip(),
+        fila.get('Segundo_Apellido', '').strip(),
+        fila.get('Primer_Nombre', '').strip(),
+        fila.get('Segundo_Nombre', '').strip()
+    ]))
+
+    subcarpeta_nombre = f"S.S.Planilla _ {nombre_completo} {nit}"
+    ruta_subcarpeta = os.path.join(carpeta_anio, subcarpeta_nombre)
+
+    if not os.path.exists(ruta_subcarpeta):
+        os.makedirs(ruta_subcarpeta)
+        print(f"✅ Subcarpeta creada: {ruta_subcarpeta}")
+    else:
+        print(f"✅ Subcarpeta existente: {ruta_subcarpeta}")
+
+    return ruta_subcarpeta
+
+
+
+@app.route('/adicionar-planilla', methods=['GET', 'POST'])
+def adicionar_planilla():
+    if not session.get('autenticado'):
+        return redirect(url_for('login'))
+
+    data = cargar_terceros_ss()
+    terceros_dict = data.set_index('NIT').to_dict(orient='index')
+    terceros_json = json.dumps(terceros_dict, ensure_ascii=False)
+
+    if request.method == 'POST':
+        nit = request.form.get('nit', '').strip()
+        fecha_pago = request.form.get('fecha_pago', '').strip()
+        planilla = request.files.get('archivo_planilla')
+        nombre_final = request.form.get('nombre_final', '').strip()
+
+        if not nit or not fecha_pago or not planilla or not nombre_final:
+            flash("Por favor completa todos los campos y selecciona un archivo válido.")
+            return redirect(url_for('adicionar_planilla'))
+
+        try:
+            ruta_destino = preparar_carpeta_guardado(nit, fecha_pago)
+            filename = f"{nombre_final}.pdf"
+            planilla.save(os.path.join(ruta_destino, filename))
+            flash(f"Planilla guardada correctamente en {ruta_destino}.")
+            return redirect(url_for('seguridad_social'))
+        except Exception as e:
+            flash(f"Error al guardar la planilla: {str(e)}")
+            return redirect(url_for('adicionar_planilla'))
+
+    return render_template_string(SeguridadSocial_AdicionarPlanilla_html, terceros_json=terceros_json)
+
+def cargar_terceros_ss():
+    try:
+        data = pd.read_csv(CSV_TERCEROS_SS, sep=',', dtype=str).fillna('')
+    except UnicodeDecodeError:
+        data = pd.read_csv(CSV_TERCEROS_SS, sep=',', dtype=str, encoding='latin-1').fillna('')
+    return data.drop_duplicates(subset='NIT')
+
+
+
+def guardar_terceros_ss(df):
+    try:
+        df.to_csv(CSV_TERCEROS_SS, index=False, sep=',', encoding='utf-8')
+    except UnicodeEncodeError:
+        # Si hay un error al codificar en UTF-8, lo intenta en latin-1
+        df.to_csv(CSV_TERCEROS_SS, index=False, sep=',', encoding='latin-1')
+
+
+
+# Agrega al final de tu archivo Flask principal (después de la función `guardar_terceros_ss`)
+
+from flask import send_file
+import io
+
+CSV_PERMISOS = r"D:/PERFIL/Escritorio/Escritorio/100. Proyecto/Proyecto Gestor Documental/bd/permisos_usuarios.csv"
+
+# =============================
+# 🔒 FUNCIONES DE PERMISOS
+# =============================
+def cargar_permisos_dict():
+    if not os.path.exists(CSV_PERMISOS):
+        return {}
+    df = pd.read_csv(CSV_PERMISOS, dtype=str).fillna('')
+    permisos = {}
+    for _, row in df.iterrows():
+        u, m, a = row['usuario'], row['modulo'], row['accion']
+        permisos.setdefault(u, {}).setdefault(m, []).append(a)
+    return permisos
+
+def tiene_permiso(modulo, accion):
+    usuario = session.get('usuario', '')
+    permisos = cargar_permisos_dict()
+    return accion in permisos.get(usuario, {}).get(modulo, [])
+
+@app.context_processor
+def inyectar_funciones():
+    return dict(tiene_permiso=tiene_permiso)
+
+# =============================
+# 📅 DASHBOARD: BOTÓN DE ACCESO
+# =============================
+# En tu plantilla HTML de dashboard, AGREGAR dentro del div .grid:
+# <div class="card" onclick="location.href='/admin/permisos'">
+#   <div class="tooltip">Administrar usuarios y permisos</div>
+#   <div class="icon">🔑</div>
+#   <div class="title">Administrador</div>
+# </div>
+
+# =============================
+# 📊 RUTA: VISTA ADMINISTRADOR DE PERMISOS
+# =============================
+
+@app.route("/admin/permisos", methods=["GET", "POST"])
+def admin_permisos():
+    csv_path = r"D:\PERFIL\Escritorio\Escritorio\100. Proyecto\Proyecto Gestor Documental\bd\permisos_usuarios.csv"
+
+    df = pd.read_csv(csv_path, delimiter=";")
+    mensaje = ""
+
+    if request.method == "POST":
+        usuario = request.form.get("usuario", "").strip().lower()
+        modulo = request.form.get("modulo", "").strip().lower()
+        accion = request.form.get("accion", "").strip().lower()
+        eliminar = request.form.get("eliminar")
+
+        if not usuario or not modulo or not accion:
+            mensaje = "⚠️ Todos los campos son obligatorios."
+        elif eliminar:
+            df = df[~((df["usuario"] == usuario) & (df["modulo"] == modulo) & (df["accion"] == accion))]
+            mensaje = f"✅ Permiso eliminado: {modulo} - {accion}."
+        else:
+            if not ((df["usuario"] == usuario) & (df["modulo"] == modulo) & (df["accion"] == accion)).any():
+                df = pd.concat([df, pd.DataFrame([{"usuario": usuario, "modulo": modulo, "accion": accion}])], ignore_index=True)
+                mensaje = f"✅ Permiso agregado: {modulo} - {accion}."
+            else:
+                mensaje = f"⚠️ El permiso ya existe."
+
+        df.to_csv(csv_path, index=False, sep=";")
+
+    permisos = df.to_dict(orient="records")
+    modulos = sorted(set(df["modulo"].unique()))
+    acciones = sorted(set(df["accion"].unique()))
+
+    return render_template_string(html_admin_permisos, permisos=permisos, modulos=modulos, acciones=acciones, mensaje=mensaje)
+
+
+# =============================
+# 📥 EXPORTAR PERMISOS A EXCEL
+# =============================
+@app.route('/admin/permisos/descargar')
+def descargar_permisos():
+    if session.get('usuario') not in ['admin', 'master']:
+        return abort(403)
+    df = pd.read_csv(CSV_PERMISOS, dtype=str).fillna('')
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Permisos')
+    output.seek(0)
+    return send_file(output, download_name="permisos_usuarios.xlsx", as_attachment=True)
+
+# ✅ MÓDULO COMPLETO Y PROFESIONAL
+
+
+@app.route('/causacion')
+def causacion():
+    return render_template_string(index_html)
+
+
+
+
+import csv
+import os
+from flask import request, redirect, flash
+
+# Ruta al archivo CSV de C.O.
+csv_co_path = r"D:\PERFIL\Escritorio\Escritorio\100. Proyecto\Proyecto Gestor Documental\bd\c_o.csv"
+
+def normalizar(texto):
+    import unicodedata
+    texto = unicodedata.normalize('NFD', texto).encode('ascii', 'ignore').decode('utf-8')
+    texto = texto.upper().strip()
+    texto = texto.replace("Ñ", "Ñ")  # conservar Ñ
+    return texto
+
+@app.route("/notas/guardar-co", methods=["POST"])
+def guardar_co():
+    codigo = request.form["codigo_co"].strip()
+    nombre = normalizar(request.form["nombre_co"])
+    
+    if not codigo.isdigit():
+        flash("El código debe ser numérico.")
+        return redirect("/notas/adicionar-co")
+
+    # Leer archivo existente o crear lista vacía
+    registros = []
+    existe = False
+    if os.path.exists(csv_co_path):
+        with open(csv_co_path, newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row["codigo_co"] == codigo:
+                    existe = True
+                    row["estado"] = "activo"  # Rehabilita si estaba inactivo
+                    row["nombre_co"] = nombre
+                registros.append(row)
+
+    if not existe:
+        registros.append({"codigo_co": codigo, "nombre_co": nombre, "estado": "activo"})
+
+    with open(csv_co_path, "w", newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=["codigo_co", "nombre_co", "estado"])
+        writer.writeheader()
+        writer.writerows(registros)
+
+    flash("Centro de Operación guardado exitosamente.")
+    return redirect("/notas/adicionar-co")
+
+@app.route("/notas/renombrar-co", methods=["POST"])
+def renombrar_co():
+    codigo = request.form["editar_co"].strip()
+    nuevo_nombre = normalizar(request.form.get("editar_co", ""))
+    actualizado = False
+
+    if not os.path.exists(csv_co_path):
+        flash("No hay registros aún.")
+        return redirect("/notas/adicionar-co")
+
+    registros = []
+    with open(csv_co_path, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["codigo_co"] == codigo:
+                row["nombre_co"] = nuevo_nombre
+                actualizado = True
+            registros.append(row)
+
+    if actualizado:
+        with open(csv_co_path, "w", newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=["codigo_co", "nombre_co", "estado"])
+            writer.writeheader()
+            writer.writerows(registros)
+        flash("Nombre de C.O. actualizado.")
+    else:
+        flash("Código C.O. no encontrado.")
+
+    return redirect("/notas/adicionar-co")
+
+@app.route("/notas/inhabilitar-co", methods=["POST"])
+def inhabilitar_co():
+    codigo = request.form["inhabilitar_co"].strip()
+    encontrado = False
+
+    if not os.path.exists(csv_co_path):
+        flash("Archivo de C.O. no encontrado.")
+        return redirect("/notas/adicionar-co")
+
+    registros = []
+    with open(csv_co_path, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["codigo_co"] == codigo:
+                row["estado"] = "inactivo"
+                encontrado = True
+            registros.append(row)
+
+    if encontrado:
+        with open(csv_co_path, "w", newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=["codigo_co", "nombre_co", "estado"])
+            writer.writeheader()
+            writer.writerows(registros)
+        flash("Centro de Operación inhabilitado.")
+    else:
+        flash("Código C.O. no encontrado.")
+
+    return redirect("/notas/adicionar-co")
+
+
+
+import csv
+import os
+from flask import request, redirect, flash
+
+csv_tipo_path = r"D:\PERFIL\Escritorio\Escritorio\100. Proyecto\Proyecto Gestor Documental\bd\tipos_documento.csv"
+
+def normalizar(texto):
+    import unicodedata
+    texto = unicodedata.normalize('NFD', texto).encode('ascii', 'ignore').decode('utf-8')
+    texto = texto.upper().strip()
+    texto = texto.replace("Ñ", "Ñ")  # conservar Ñ
+    return texto
+
+@app.route("/notas/guardar-tipo", methods=["POST"])
+def guardar_tipo():
+    tipo = normalizar(request.form["tipo_doc"])
+    nombre = normalizar(request.form["nombre_tipo"])
+
+    registros = []
+    existe = False
+
+    if os.path.exists(csv_tipo_path):
+        with open(csv_tipo_path, newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row["tipo"] == tipo:
+                    existe = True
+                    row["estado"] = "activo"
+                    row["nombre"] = nombre
+                registros.append(row)
+
+    if not existe:
+        registros.append({"tipo": tipo, "nombre": nombre, "estado": "activo"})
+
+    with open(csv_tipo_path, "w", newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=["tipo", "nombre", "estado"])
+        writer.writeheader()
+        writer.writerows(registros)
+
+    flash("Tipo de documento guardado correctamente.")
+    return redirect("/notas/adicionar-tipo")
+
+@app.route("/notas/renombrar-tipo", methods=["POST"])
+def renombrar_tipo():
+    tipo = normalizar(request.form["editar_tipo"])
+    nuevo_nombre = normalizar(request.form["nuevo_nombre"])
+    actualizado = False
+
+    if not os.path.exists(csv_tipo_path):
+        flash("No hay tipos registrados aún.")
+        return redirect("/notas/adicionar-tipo")
+
+    registros = []
+    with open(csv_tipo_path, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["tipo"] == tipo:
+                row["nombre"] = nuevo_nombre
+                actualizado = True
+            registros.append(row)
+
+    if actualizado:
+        with open(csv_tipo_path, "w", newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=["tipo", "nombre", "estado"])
+            writer.writeheader()
+            writer.writerows(registros)
+        flash("Tipo de documento actualizado.")
+    else:
+        flash("Tipo no encontrado.")
+
+    return redirect("/notas/adicionar-tipo")
+
+@app.route("/notas/inhabilitar-tipo", methods=["POST"])
+def inhabilitar_tipo():
+    tipo = normalizar(request.form["inhabilitar_tipo"])
+    encontrado = False
+
+    if not os.path.exists(csv_tipo_path):
+        flash("Archivo no encontrado.")
+        return redirect("/notas/adicionar-tipo")
+
+    registros = []
+    with open(csv_tipo_path, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["tipo"] == tipo:
+                row["estado"] = "inactivo"
+                encontrado = True
+            registros.append(row)
+
+    if encontrado:
+        with open(csv_tipo_path, "w", newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=["tipo", "nombre", "estado"])
+            writer.writeheader()
+            writer.writerows(registros)
+        flash("Tipo de documento inhabilitado.")
+    else:
+        flash("Tipo no encontrado.")
+
+    return redirect("/notas/adicionar-tipo")
+
+
+
+from flask import request, redirect, flash, session
+import os
+import csv
+import fitz  # PyMuPDF
+from werkzeug.utils import secure_filename
+from datetime import datetime
+from unidecode import unidecode
+
+RUTA_RAIZ = r'D:\PERFIL\Escritorio\Escritorio\4. Archivo Digital'
+CSV_DOCUMENTOS = os.path.join(RUTA_RAIZ, 'documentos_notas.csv')
+
+# Función para limpiar nombres
+def limpiar_texto(texto):
+    texto = unidecode(texto).replace("Ñ", "Ñ")  # Solo permite Ñ
+    texto = ''.join(c for c in texto if c.isalnum() or c in (' ', '-', '_')).upper().strip()
+    return texto
+
+# Función para convertir imagen a PDF
+def convertir_a_pdf(imagen_path, destino_pdf):
+    try:
+        doc = fitz.open()
+        img = fitz.Pixmap(imagen_path)
+        pdf_bytes = fitz.open()  # nuevo documento PDF
+        rect = fitz.Rect(0, 0, img.width, img.height)
+        page = doc.new_page(width=img.width, height=img.height)
+        page.insert_image(rect, filename=imagen_path)
+        doc.save(destino_pdf)
+        doc.close()
+        return True
+    except Exception as e:
+        print("Error al convertir imagen:", e)
+        return False
+
+@app.route('/notas/guardar-documento', methods=['POST'])
+def guardar_documento():
+    if 'usuario' not in session:
+        flash('⚠️ Debes iniciar sesión para guardar documentos.')
+        return redirect('/login')
+
+    empresa = request.form.get('empresa')
+    anio = request.form.get('anio')
+    mes = request.form.get('mes')
+    co = limpiar_texto(request.form.get('co'))
+    tipo = limpiar_texto(request.form.get('tipo_doc'))
+    numero = request.form.get('numero_doc').zfill(8)
+
+    archivos = request.files.getlist('soportes')
+
+    if not all([empresa, anio, mes, co, tipo, numero]) or not archivos:
+        flash("Todos los campos son obligatorios y deben incluir soportes.")
+        return redirect('/notas/adicionar')
+
+    nombre_documento = f"{co}-{tipo}-{numero}"
+
+    # Construcción de la ruta
+    ruta_destino = os.path.join(RUTA_RAIZ, anio, empresa, mes, tipo, nombre_documento)
+    if not os.path.exists(ruta_destino):
+        try:
+            os.makedirs(ruta_destino)
+        except Exception as e:
+            flash(f"❌ Error al crear carpeta: {e}")
+            return redirect('/notas/adicionar')
+
+    errores = []
+    for archivo in archivos[:6]:
+        nombre_original = secure_filename(archivo.filename)
+        nombre_anexo = request.form.get('nombre_anexo', '')  # (en una futura versión)
+        nombre_final = f"{nombre_documento} ANEXO {os.path.splitext(nombre_original)[0]}"
+        nombre_final = limpiar_texto(nombre_final) + ".pdf"
+        ruta_final = os.path.join(ruta_destino, nombre_final)
+
+        if archivo.filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+            # Convertir imagen a PDF
+            ruta_temp = os.path.join(ruta_destino, secure_filename(archivo.filename))
+            archivo.save(ruta_temp)
+            exito = convertir_a_pdf(ruta_temp, ruta_final)
+            os.remove(ruta_temp)
+            if not exito:
+                errores.append(nombre_original)
+        else:
+            # Guardar directamente si es PDF
+            archivo.save(ruta_final)
+
+    # Guardar registro en CSV
+    with open(CSV_DOCUMENTOS, mode='a', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow([datetime.now().isoformat(), nombre_documento, empresa, anio, mes, tipo, co, numero])
+
+    if errores:
+        flash(f"⚠️ Se guardaron los archivos, pero hubo error al convertir: {', '.join(errores)}")
+    else:
+        flash(f"✅ Documento {nombre_documento} guardado exitosamente con sus soportes.")
+    return redirect('/notas/dashboard')
+
+
+
+
+
+import pandas as pd
+from flask import request, jsonify
+
+from flask import request, jsonify
+import os
+
+@app.route('/notas/listar')
+def listar_documentos_notas():
+    base_dir = r"D:\PERFIL\Escritorio\Escritorio\4. Archivo Digital"
+
+    empresa = request.args.get("empresa", "").strip()
+    anio = request.args.get("anio", "").strip()
+    mes = request.args.get("mes", "").strip()
+    buscar = request.args.get("buscar", "").strip().lower()
+
+    resultados = []
+
+    # Recorrer año
+    for carpeta_anio in os.listdir(base_dir):
+        ruta_anio = os.path.join(base_dir, carpeta_anio)
+        if not os.path.isdir(ruta_anio) or (anio and carpeta_anio != anio):
+            continue
+
+        # Recorrer empresa
+        for carpeta_empresa in os.listdir(ruta_anio):
+            ruta_empresa = os.path.join(ruta_anio, carpeta_empresa)
+            if not os.path.isdir(ruta_empresa) or (empresa and carpeta_empresa != empresa):
+                continue
+
+            # Recorrer mes
+            for carpeta_mes in os.listdir(ruta_empresa):
+                ruta_mes = os.path.join(ruta_empresa, carpeta_mes)
+                if not os.path.isdir(ruta_mes) or (mes and carpeta_mes != mes):
+                    continue
+
+                # Recorrer tipo documento
+                for tipo in os.listdir(ruta_mes):
+                    ruta_tipo = os.path.join(ruta_mes, tipo)
+                    if not os.path.isdir(ruta_tipo): continue
+
+                    for carpeta_doc in os.listdir(ruta_tipo):
+                        if buscar and buscar not in carpeta_doc.lower():
+                            continue
+                        ruta_carpeta_doc = os.path.join(ruta_tipo, carpeta_doc)
+                        if os.path.isdir(ruta_carpeta_doc):
+                            resultados.append({
+                                "archivo": carpeta_doc,
+                                "empresa": carpeta_empresa,
+                                "anio": carpeta_anio,
+                                "mes": carpeta_mes
+                            })
+
+    return jsonify(resultados)
+
+
+
+
+from flask import send_file
+import tempfile
+
+@app.route('/notas/exportar-listado', methods=['GET'])
+def exportar_documentos_filtrados():
+    ruta_csv = r"D:\PERFIL\Escritorio\Escritorio\100. Proyecto\Proyecto Gestor Documental\bd\documentos_notas.csv"
+    if not os.path.exists(ruta_csv):
+        return "No existe el archivo", 404
+
+    df = pd.read_csv(ruta_csv, dtype=str).fillna("")
+
+    # Filtros como en /notas/listar
+    empresa = request.args.get("empresa", "").strip().upper()
+    anio = request.args.get("anio", "").strip()
+    mes = request.args.get("mes", "").strip()
+    co = request.args.get("co", "").strip()
+    tipo = request.args.get("tipo", "").strip().upper()
+    numero = request.args.get("numero", "").strip().zfill(8)
+
+    if empresa:
+        df = df[df["empresa"].str.upper() == empresa]
+    if anio:
+        df = df[df["anio"] == anio]
+    if mes:
+        df = df[df["mes"] == mes]
+    if co:
+        df = df[df["co"] == co]
+    if tipo:
+        df = df[df["tipo"].str.upper() == tipo]
+    if numero:
+        df = df[df["numero"].str.endswith(numero)]
+
+    # Generamos Excel solo con nombre documento, mes y año
+    df['nombre_documento'] = df['nombre']
+    df['periodo'] = df['mes'] + " " + df['anio']
+    df_export = df[['nombre_documento', 'periodo']]
+
+    # Guardar temporalmente
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
+        ruta_temp = tmp.name
+        df_export.to_excel(ruta_temp, index=False)
+
+    return send_file(ruta_temp, as_attachment=True, download_name='listado_notas.xlsx')
+
+from flask import render_template_string
+
+# Asegúrate de que la variable Notas_Contables_Dashboard esté definida antes de esta ruta
+
+@app.route('/notas-contables')
+def notas_contables():
+    filtro = request.args.get('filtro', '').lower()
+    carpeta = request.args.get('carpeta', '')
+    subcarpeta = request.args.get('subcarpeta', '')
+    pagina = int(request.args.get('pagina', 1))
+    por_pagina = int(request.args.get('por_pagina', 10))
+    archivo_actual = request.args.get('archivo', '')
+
+    BASE_NOTAS = r"D:\PERFIL\Escritorio\Escritorio\4. Archivo Digital"
+    archivos = []
+    carpetas = []
+    subcarpetas_set = set()
+
+    for root, dirs, files in os.walk(BASE_NOTAS):
+        rel_path = os.path.relpath(root, BASE_NOTAS)
+        if rel_path == ".":
+            carpetas = dirs
+        for d in dirs:
+            if d.isdigit() or d.startswith("20"):
+                subcarpetas_set.add(d)
+        for f in files:
+            if f.lower().endswith('.pdf'):
+                full_path = os.path.join(root, f)
+                if carpeta and not rel_path.startswith(carpeta):
+                    continue
+                if subcarpeta and subcarpeta not in rel_path:
+                    continue
+                if filtro and filtro not in f.lower():
+                    continue
+                ruta_relativa = os.path.relpath(full_path, BASE_NOTAS)
+                archivos.append(("NC", ruta_relativa, f, os.path.getmtime(full_path)))
+
+    archivos.sort(key=lambda x: x[3], reverse=True)
+    total_paginas = (len(archivos) + por_pagina - 1) // por_pagina
+    archivos_pagina = archivos[(pagina-1)*por_pagina : pagina*por_pagina]
+
+    return render_template_string(Notas_Contables_Dashboard,
+        archivos=archivos_pagina,
+        carpetas=carpetas,
+        subcarpetas=sorted(list(subcarpetas_set)),
+        cantidad_archivos=len(archivos),
+        pagina=pagina,
+        total_paginas=total_paginas,
+        por_pagina=por_pagina,
+        filtro=filtro,
+        ruta_relativa=carpeta,
+        subcarpeta=subcarpeta,
+        archivo_actual=archivo_actual,
+        datetimeformat=lambda ts: datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    )
+
+
+## para utilizar el botn ver pdf en el modulo de notas contalbes 
+@app.route("/ver-pdf/<sede>/<path:archivo>")
+def servir_pdf_notas(sede, archivo):
+    base_path = r"D:\PERFIL\Escritorio\Escritorio\4. Archivo Digital" if sede == "NC" else "otra_ruta"
+    full_path = os.path.join(base_path, archivo)
+    if os.path.exists(full_path):
+        return send_file(full_path, mimetype="application/pdf")
+    return "Archivo no encontrado", 404
+
+
+
+
+
+### ### ### renombar en modulo de noas contables
+
+@app.route('/renombrar-nota/<path:archivo>', methods=['GET', 'POST'])
+def renombrar_notas(archivo):
+    ruta_completa = os.path.join(BASE_DIR, archivo)
+    nombre_actual = os.path.basename(archivo)
+
+    if request.method == 'POST':
+        nuevo_nombre = request.form.get('nuevo_nombre')
+        if nuevo_nombre:
+            ruta_nueva = os.path.join(os.path.dirname(ruta_completa), f"{nuevo_nombre}.pdf")
+            os.rename(ruta_completa, ruta_nueva)
+            return redirect(url_for('vista_notas_contables'))
+
+    return render_template_string("""
+    <h2>Renombrar Documento</h2>
+    <form method="post">
+        <label>Nuevo nombre (sin .pdf):</label>
+        <input name="nuevo_nombre" value="{{ nombre_actual | replace('.pdf', '') }}">
+        <button type="submit">💾 Renombrar</button>
+    </form>
+    <p><a href="{{ url_for('vista_notas_contables') }}">⏪ Volver</a></p>
+    """, archivo=archivo, nombre_actual=nombre_actual)
+
+
+##### FIAN CODIGO APRA MODULO NOTAS CONTABLES
+
+
+
+
+
+
+
+
+    
+if __name__ == '__main__':
+    socketio.run(app, port=8092, debug=True)
+
+
+
+
+
+
+
+
+    
+    
+    # pergar en cdm ventanas diferentes esto , apra ejecuatr el servidor desde ngroud
+    # C:/Users/Usuario/AppData/Local/Microsoft/WindowsApps/python3.11.exe "d:/PERFIL/Escritorio/Escritorio/100. Proyecto/Proyecto Archivo Digital/Archivo_Digital_V23052025.2.py"
+    # "C:\Users\Usuario\Downloads\ngrok-v3-stable-windows-amd64\ngrok.exe" http 8092
